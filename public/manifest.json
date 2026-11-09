@@ -1,10 +1,21 @@
 {
   "manifest_version": 3,
   "name": "CityMail Finder",
-  "version": "1.0.0",
-  "description": "Find publicly published business contact emails from business websites.",
-  "permissions": ["storage", "unlimitedStorage", "tabs"],
-  "host_permissions": ["https://*.vercel.app/*"],
-  "background": { "service_worker": "background.js" },
-  "action": { "default_title": "Open CityMail Finder" }
+  "version": "1.1.0",
+  "description": "Collect publicly visible business email addresses from Google search results by city.",
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://www.google.com/search*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Open CityMail Finder"
+  }
 }
