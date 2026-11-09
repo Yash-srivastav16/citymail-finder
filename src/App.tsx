@@ -31,7 +31,7 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 function waitForTab(tabId: number): Promise<void> {
   return new Promise((resolve, reject) => {
     const timer = window.setTimeout(() => { chrome.tabs.onUpdated.removeListener(listener); reject(new Error("Google page load timed out")); }, 30000);
-    const listener = (updatedId: number, info: chrome.tabs.OnUpdatedInfo) => {
+    const listener = (updatedId: number, info: { status?: string }) => {
       if (updatedId === tabId && info.status === "complete") {
         window.clearTimeout(timer); chrome.tabs.onUpdated.removeListener(listener); resolve();
       }
