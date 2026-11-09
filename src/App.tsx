@@ -59,7 +59,7 @@ export default function App() {
     }
   }
   async function test() {
-    try { const r = await fetch(api.replace(/\/$/, "") + "/api/health", { headers }); const b = await r.json(); if (!r.ok) throw new Error(b.error || r.statusText); setStatus("API connected · " + (b.configured?.searxng ? "SearXNG" : b.configured?.tavilyFallback ? "Tavily" : "No provider configured")); }
+    try { const r = await fetch(api.replace(/\/$/, "") + "/api/health", { headers }); const b = await r.json(); if (!r.ok) throw new Error(b.error || r.statusText); setStatus("API connected · " + (b.configured?.freesea ? "Freesea" : b.configured?.searxng ? "SearXNG" : b.configured?.tavilyFallback ? "Tavily" : "No provider configured")); }
     catch (e) { setStatus("Connection failed: " + (e as Error).message); }
   }
   async function run() {
