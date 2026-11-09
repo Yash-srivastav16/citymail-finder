@@ -3,7 +3,6 @@ import * as XLSX from "xlsx";
 
 type Result = { city: string; email: string; sourceUrl: string; domain: string; sourceType: string; createdAt: string };
 const DB = "citymail-finder";
-const emailRx = /[A-Z0-9.!#$%&'*+/=?^`_{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/gi;
 
 function dbOpen(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -95,6 +94,7 @@ export default function App() {
     setBusy(true);
     let tabId: number | undefined;
     let total = 0;
+    let keepTabOpen = false;
     try {
       for (const city of cities) {
         const search = query.replaceAll("{city}", city).trim();
@@ -111,11 +111,30 @@ export default function App() {
             await chrome.tabs.update(tabId, { url });
             await loaded;
           }
-          await sleep(2500 + Math.floor(Math.random() * 2000));
-          const pageData = await extractVisibleEmails(tabId);
+          await sleep(1500 + Math.floor(Math.random() * 1000));
+          let pageData = await extractVisibleEmails(tabId);
           if (pageData.captcha) {
-            setStatus("Google verification appeared at " + city + ", page " + (page + 1) + ". Queue stopped; no CAPTCHA bypass is attempted.");
-            return;
+            keepTabOpen = true;
+            await chrome.tabs.update(tabId, { active: true });
+            setStatus("CAPTCHA at " + city + ", page " + (page + 1) + ". Solve it in the Google tab; searching will resume automatically (up to 5 minutes).");
+            const deadline = Date.now() + 5 * 60 * 1000;
+            while (Date.now() < deadline) {
+              await sleep(1500);
+              try {
+                pageData = await extractVisibleEmails(tabId);
+                if (!pageData.captcha) {
+                  keepTabOpen = false;
+                  setStatus("Verification cleared. Resuming " + city + " · page " + (page + 1) + "/" + pages);
+                  break;
+                }
+              } catch {
+                // Google may be navigating between the challenge and results page.
+              }
+            }
+            if (pageData.captcha) {
+              setStatus("Still waiting for Google verification at " + city + ", page " + (page + 1) + ". Start again after completing the challenge.");
+              return;
+            }
           }
           const rows: Result[] = pageData.emails.map(email => ({ city, email, sourceUrl: pageData.url, domain: "google.com", sourceType: "google-visible-result", createdAt: new Date().toISOString() }));
           if (rows.length) {
@@ -130,7 +149,7 @@ export default function App() {
     } finally {
       if (tabId !== undefined) {
         const tabs = await chrome.tabs.get(tabId).catch(() => null);
-        if (tabs && !/sorry|unusual traffic|captcha/i.test(tabs.url || "")) await chrome.tabs.remove(tabId).catch(() => undefined);
+        if (tabs && !keepTabOpen && !/sorry|unusual traffic|captcha/i.test(tabs.url || "")) await chrome.tabs.remove(tabId).catch(() => undefined);
       }
       setBusy(false);
     }
