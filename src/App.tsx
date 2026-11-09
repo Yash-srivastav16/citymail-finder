@@ -1,14 +1,10 @@
 import { useEffect, useState } from "react";
 import * as XLSX from "xlsx";
 
-type City = string;
-type Template = { name: string; query: string };
-type Result = { city: string; email: string; sourceUrl: string; domain: string; sourceType: string; template?: string; createdAt: string };
-const defaults: Template[] = [
-  { name: "Business contact", query: '"{city}" business contact email' },
-  { name: "Official contact page", query: '"{city}" "contact us" email' }
-];
+type Result = { city: string; email: string; sourceUrl: string; domain: string; sourceType: string; createdAt: string };
 const DB = "citymail-finder";
+const emailRx = /[A-Z0-9.!#$%&'*+/=?^`_{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/gi;
+
 function dbOpen(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const r = indexedDB.open(DB, 1);
@@ -20,7 +16,7 @@ async function saveRows(rows: Result[]) {
   const db = await dbOpen();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction("results", "readwrite"), store = tx.objectStore("results");
-    rows.forEach(row => store.put({ ...row, key: row.city.trim().toLowerCase() + "|" + row.email.trim().toLowerCase() }));
+    rows.forEach(row => store.put({ ...row, key: row.email.toLowerCase() }));
     tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error);
   });
 }
@@ -31,104 +27,116 @@ async function readRows(): Promise<Result[]> {
     r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error);
   });
 }
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+function waitForTab(tabId: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => { chrome.tabs.onUpdated.removeListener(listener); reject(new Error("Google page load timed out")); }, 30000);
+    const listener = (updatedId: number, info: chrome.tabs.OnUpdatedInfo) => {
+      if (updatedId === tabId && info.status === "complete") {
+        window.clearTimeout(timer); chrome.tabs.onUpdated.removeListener(listener); resolve();
+      }
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
+async function extractVisibleEmails(tabId: number) {
+  const [injected] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      const text = document.body?.innerText || "";
+      const captcha = /unusual traffic|automated queries|not a robot|our systems have detected|sorry\/.*computer network/i.test(text);
+      const emails = [...new Set((text.match(/[A-Z0-9.!#$%&'*+/=?^`_{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/gi) || []).map(x => x.toLowerCase()))];
+      return { captcha, emails, title: document.title, url: location.href };
+    }
+  });
+  return injected.result as { captcha: boolean; emails: string[]; title: string; url: string };
+}
 export default function App() {
-  const [api, setApi] = useState(localStorage.getItem("cm-api") || "");
-  const [token, setToken] = useState(localStorage.getItem("cm-token") || "");
-  const [cities, setCities] = useState<City[]>(JSON.parse(localStorage.getItem("cm-cities") || "[]"));
-  const [templates, setTemplates] = useState<Template[]>(JSON.parse(localStorage.getItem("cm-templates") || "null") || defaults);
+  const [cities, setCities] = useState<string[]>(JSON.parse(localStorage.getItem("cm-cities") || "[]"));
   const [cityInput, setCityInput] = useState("");
-  const [paused, setPaused] = useState(false);
-  const [resumeWait, setResumeWait] = useState<(() => void) | null>(null);
-  const [pausedCity, setPausedCity] = useState("");
-  const [pauseReason, setPauseReason] = useState("");
-  const [query, setQuery] = useState('"{city}" business email contact');
+  const [query, setQuery] = useState('"\u007bcity\u007d" business email contact');
+  const [pages, setPages] = useState(Number(localStorage.getItem("cm-pages") || 50));
   const [results, setResults] = useState<Result[]>([]);
   const [status, setStatus] = useState("Ready");
   const [busy, setBusy] = useState(false);
   useEffect(() => { readRows().then(setResults).catch(e => setStatus(e.message)); }, []);
-  useEffect(() => { localStorage.setItem("cm-api", api); localStorage.setItem("cm-token", token); localStorage.setItem("cm-cities", JSON.stringify(cities)); localStorage.setItem("cm-templates", JSON.stringify(templates)); }, [api, token, cities, templates]);
-  const headers = { "Content-Type": "application/json", ...(token ? { "X-CityMail-Token": token } : {}) };
+  useEffect(() => { localStorage.setItem("cm-cities", JSON.stringify(cities)); localStorage.setItem("cm-pages", String(pages)); }, [cities, pages]);
+
   async function importCities(file?: File) {
     if (!file) return;
     try {
-      const data = await file.arrayBuffer();
-      const workbook = XLSX.read(data, { type: "array" });
-      const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "" });
+      const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
+      const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(workbook.Sheets[workbook.SheetNames[0]], { defval: "" });
       const header = Object.keys(rows[0] || {}).find(k => k.trim().toLowerCase() === "city");
-      if (!header) throw new Error("Excel must contain a column named City.");
+      if (!header) throw new Error('Excel must contain a column named "City".');
       const imported = rows.map(row => String(row[header] || "").trim()).filter(Boolean);
-      if (!imported.length) throw new Error("No city names found in the City column.");
       setCities(old => [...new Set([...old, ...imported])]);
-      setStatus("Imported " + imported.length + " city rows from Excel.");
+      setStatus("Imported " + imported.length + " city rows.");
     } catch (e) { setStatus("Excel import failed: " + (e as Error).message); }
   }
-  function addCity() {
-    const next = cityInput.split(/[\n,;]+/).map(x => x.trim()).filter(Boolean);
+  function addCities() {
+    const next = cityInput.split(/[\\n,;]+/).map(x => x.trim()).filter(Boolean);
     setCities(old => [...new Set([...old, ...next])]); setCityInput("");
   }
-  function openManualSearch(city: string, engine: "google" | "bing" = "google") {
-    const searchQuery = query.replaceAll("{city}", city).trim();
-    const base = engine === "google" ? "https://www.google.com/search?q=" : "https://www.bing.com/search?q=";
-    const url = base + encodeURIComponent(searchQuery);
-    if (typeof chrome !== "undefined" && chrome.tabs?.create) {
-      chrome.tabs.create({ url });
-    } else {
-      window.open(url, "_blank", "noopener,noreferrer");
+  async function run() {
+    if (!cities.length) { setStatus("Import or add at least one city."); return; }
+    if (!chrome?.tabs || !chrome?.scripting) { setStatus("Open this tool from the installed Chrome extension."); return; }
+    setBusy(true);
+    let tabId: number | undefined;
+    let total = 0;
+    try {
+      for (const city of cities) {
+        const search = query.replaceAll("{city}", city).trim();
+        for (let page = 0; page < Math.min(50, Math.max(1, pages)); page++) {
+          const url = "https://www.google.com/search?q=" + encodeURIComponent(search) + "&num=10&filter=0&start=" + (page * 10);
+          setStatus("Opening Google · " + city + " · page " + (page + 1) + "/" + pages);
+          if (tabId === undefined) {
+            const tab = await chrome.tabs.create({ url, active: false });
+            if (tab.id === undefined) throw new Error("Could not open Google tab.");
+            tabId = tab.id;
+            if (tab.status !== "complete") await waitForTab(tabId);
+          } else {
+            const loaded = waitForTab(tabId);
+            await chrome.tabs.update(tabId, { url });
+            await loaded;
+          }
+          await sleep(2500 + Math.floor(Math.random() * 2000));
+          const pageData = await extractVisibleEmails(tabId);
+          if (pageData.captcha) {
+            setStatus("Google verification appeared at " + city + ", page " + (page + 1) + ". Queue stopped; no CAPTCHA bypass is attempted.");
+            return;
+          }
+          const rows: Result[] = pageData.emails.map(email => ({ city, email, sourceUrl: pageData.url, domain: "google.com", sourceType: "google-visible-result", createdAt: new Date().toISOString() }));
+          if (rows.length) {
+            await saveRows(rows); total += rows.length; setResults(await readRows());
+          }
+          if (page > 0 && pageData.emails.length === 0 && /did not match any documents|no results found/i.test(pageData.title)) break;
+        }
+      }
+      setStatus("Finished. Found " + total + " email matches; duplicates are removed.");
+    } catch (e) {
+      setStatus("Stopped: " + (e as Error).message);
+    } finally {
+      if (tabId !== undefined) {
+        const tabs = await chrome.tabs.get(tabId).catch(() => null);
+        if (tabs && !/sorry|unusual traffic|captcha/i.test(tabs.url || "")) await chrome.tabs.remove(tabId).catch(() => undefined);
+      }
+      setBusy(false);
     }
   }
-  async function test() {
-    try { const r = await fetch(api.replace(/\/$/, "") + "/api/health", { headers }); const b = await r.json(); if (!r.ok) throw new Error(b.error || r.statusText); setStatus("API connected · " + (b.configured?.freesea ? "Freesea" : b.configured?.searxng ? "SearXNG" : b.configured?.tavilyFallback ? "Tavily" : "No provider configured")); }
-    catch (e) { setStatus("Connection failed: " + (e as Error).message); }
-  }
-  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-  async function run() {
-    if (!api || !cities.length || !templates.length) { setStatus("Set API URL, add a city and at least one template."); return; }
-    setBusy(true); setPaused(false); let count = 0;
-    try {
-      for (const city of cities) for (const t of templates) {
-        setStatus("Waiting before search · " + city);
-        // Deliberately pace requests to reduce provider throttling.
-        await sleep(12000 + Math.floor(Math.random() * 8000));
-        setStatus("Searching " + city + " · " + t.name);
-        const payload = { city, query: t.query.replaceAll("{city}", city), template: t.name };
-        const r = await fetch(api.replace(/\/$/, "") + "/api/search", { method: "POST", headers, body: JSON.stringify(payload) });
-        const b = await r.json().catch(() => ({}));
-        const errorText = String(b.error || "");
-        const needsPause = r.status === 429 || b.code === "RATE_LIMITED" || b.code === "CAPTCHA_REQUIRED" ||
-          /captcha|human verification|verify you are human|rate.?limit|too many requests|http 429/i.test(errorText);
-        if (needsPause) {
-          setPaused(true); setPausedCity(city);
-          setPauseReason(/captcha|human verification|verify you are human/i.test(errorText) || b.code === "CAPTCHA_REQUIRED" ? "CAPTCHA / human verification" : "Provider rate limit");
-          setStatus("Paused at " + city + ". Open the provider page manually, complete any verification, wait a little, then choose Resume.");
-          await new Promise<void>(resolve => setResumeWait(() => resolve));
-          setPaused(false); setResumeWait(null); setPausedCity(""); setPauseReason("");
-          setStatus("Cooling down for 60 seconds before retrying " + city + "…");
-          await sleep(60000);
-          const retry = await fetch(api.replace(/\/$/, "") + "/api/search", { method: "POST", headers, body: JSON.stringify(payload) });
-          const retryBody = await retry.json().catch(() => ({}));
-          if (!retry.ok) throw new Error(retryBody.error || "Search failed after manual resume. Queue stopped safely.");
-          await saveRows(retryBody.results || []); count += retryBody.count || 0; setResults(await readRows());
-          continue;
-        }
-        if (!r.ok) throw new Error(errorText || "Search failed");
-        await saveRows(b.results || []); count += b.count || 0; setResults(await readRows());
-      }
-      setStatus("Completed. " + count + " records returned (local results are deduplicated).");
-    } catch (e) { setStatus("Search stopped: " + (e as Error).message); }
-    finally { setBusy(false); setPaused(false); }
-  }
   function exportExcel() {
-    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([["Email"], ...[...new Set(results.map(r => r.email.toLowerCase()))].map(email => [email])]), "Emails");
+    const emails = [...new Set(results.map(r => r.email.toLowerCase()))];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([["Email"], ...emails.map(email => [email])]), "Emails");
     XLSX.writeFile(wb, "citymail-emails.xlsx");
   }
   return <main className="app">
-    <header><h1>CityMail Finder</h1><p>Discover publicly listed business contact emails</p></header>
-    <section><h2>Backend</h2><label>Vercel API URL<input value={api} onChange={e => setApi(e.target.value)} placeholder="https://your-project.vercel.app"/></label><label>Access token (optional)<input type="password" value={token} onChange={e => setToken(e.target.value)}/></label><button onClick={test}>Test connection</button></section>
-    <section><h2>Import cities from Excel</h2><label>Upload .xlsx or .csv (requires a column named City)<input type="file" accept=".xlsx,.xls,.csv" onChange={e => importCities(e.target.files?.[0])}/></label></section><section><h2>Cities</h2><textarea value={cityInput} onChange={e => setCityInput(e.target.value)} placeholder="Add cities, one per line or comma separated"/><button onClick={addCity}>Add cities</button><div className="city-list">{cities.length ? cities.map(city => <div className="city-row" key={city}><span>{city}</span><div><button type="button" onClick={() => openManualSearch(city, "google")}>Google search</button> <button type="button" onClick={() => openManualSearch(city, "bing")}>Bing search</button></div></div>) : <p>No cities added</p>}</div></section>
-    <section><h2>Search template</h2><label>Query (must contain {"{city}"})<input value={query} onChange={e => setQuery(e.target.value)}/></label><button onClick={() => setTemplates(old => [...old, { name: "Template " + (old.length + 1), query }])}>Add template</button><ul>{templates.map((t, i) => <li key={i}>{t.name}: {t.query} <button onClick={() => setTemplates(old => old.filter((_, n) => n !== i))}>Remove</button></li>)}</ul></section>
-    <section><h2>Search</h2><button disabled={busy} onClick={run}>{busy ? "Searching…" : "Start search"}</button> {paused && <><p><strong>{pauseReason}</strong> · {pausedCity}</p><button onClick={() => openManualSearch(pausedCity, "google")}>Open Google page manually</button> <button onClick={() => resumeWait?.()}>Resume after verification</button></>} <button disabled={busy || !results.length} onClick={exportExcel}>Export emails only</button><p role="status">{status}</p><p>{results.length} unique city/email records saved locally</p></section>
-    <section><h2>Collected emails</h2><p>{new Set(results.map(r => r.email.toLowerCase())).size} unique email addresses</p><div className="table"><table><thead><tr><th>Email</th></tr></thead><tbody>{[...new Set(results.map(r => r.email.toLowerCase()))].map(email => <tr key={email}><td>{email}</td></tr>)}</tbody></table></div></section>
-    <footer>Only public business contact information is processed. Respect site terms, robots.txt and rate limits.</footer>
+    <header><h1>CityMail Finder</h1><p>Automatically collect email addresses visible in Google search results</p></header>
+    <section><h2>Import cities</h2><label>Upload .xlsx or .csv (column name: City)<input type="file" accept=".xlsx,.xls,.csv" onChange={e => importCities(e.target.files?.[0])}/></label></section>
+    <section><h2>Cities</h2><textarea value={cityInput} onChange={e => setCityInput(e.target.value)} placeholder="Add cities, one per line or comma separated"/><button onClick={addCities}>Add cities</button><p>{cities.length} cities loaded</p><ul>{cities.map(city => <li key={city}>{city}</li>)}</ul></section>
+    <section><h2>Google search settings</h2><label>Search query (use {"{city}"} where city name should appear)<input value={query} onChange={e => setQuery(e.target.value)}/></label><label>Pages per city (1–50)<input type="number" min="1" max="50" value={pages} onChange={e => setPages(Math.min(50, Math.max(1, Number(e.target.value) || 1)))}/></label><p>Searches run page by page with a delay. Only emails visible on Google result pages are collected; business websites are not crawled.</p></section>
+    <section><h2>Run</h2><button disabled={busy || !cities.length} onClick={run}>{busy ? "Searching Google…" : "Start automatic search"}</button><button disabled={busy || !results.length} onClick={exportExcel}>Export emails only</button><p role="status">{status}</p><p>{new Set(results.map(r => r.email.toLowerCase())).size} unique email addresses saved locally</p></section>
+    <section><h2>Collected emails</h2><div className="table"><table><thead><tr><th>Email</th></tr></thead><tbody>{[...new Set(results.map(r => r.email.toLowerCase()))].map(email => <tr key={email}><td>{email}</td></tr>)}</tbody></table></div></section>
+    <footer>Uses Google search results in your browser. Google may limit automated requests or show verification; the extension stops rather than bypassing it.</footer>
   </main>;
 }
