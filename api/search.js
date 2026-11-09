@@ -122,7 +122,12 @@ export default async function handler(req, res) {
     }
     return res.status(200).json({ ok: true, provider: searched.provider, count: found.size, results: [...found.values()] });
   } catch (e) {
-    console.error("[citymail] search_failed", JSON.stringify({ city, template, message: e.message || "Search failed" }));
-    return res.status(502).json({ error: e.message || "Search failed" });
+    const message = e.message || "Search failed";
+    const captcha = /captcha|human verification|verify you are human|challenge/i.test(message);
+    const rateLimited = /http 429|rate.?limit|too many requests/i.test(message);
+    console.error("[citymail] search_failed", JSON.stringify({ city, template, code: captcha ? "CAPTCHA_REQUIRED" : rateLimited ? "RATE_LIMITED" : "SEARCH_FAILED", message }));
+    if (captcha) return res.status(429).json({ code: "CAPTCHA_REQUIRED", error: "Provider requires manual CAPTCHA / human verification. Pause the queue, open the provider page manually, complete verification, then resume." });
+    if (rateLimited) return res.status(429).json({ code: "RATE_LIMITED", error: "Search provider rate limit reached. Pause the queue and wait before resuming." });
+    return res.status(502).json({ code: "SEARCH_FAILED", error: message });
   }
 }
