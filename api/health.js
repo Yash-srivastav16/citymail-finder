@@ -5,6 +5,7 @@ export default function handler(_req, res) {
     service: "citymail-finder-api",
     mode: "serverless-batch",
     configured: {
+      freesea: Boolean(process.env.FREESEA_API_KEY),
       searxng: Boolean(process.env.SEARXNG_URL),
       tavilyFallback: Boolean(process.env.TAVILY_API_KEY)
     }
