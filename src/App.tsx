@@ -37,7 +37,7 @@ export default function App() {
   const [cities, setCities] = useState<City[]>(JSON.parse(localStorage.getItem("cm-cities") || "[]"));
   const [templates, setTemplates] = useState<Template[]>(JSON.parse(localStorage.getItem("cm-templates") || "null") || defaults);
   const [cityInput, setCityInput] = useState("");
-  const [query, setQuery] = useState('"'{city}'" business email contact');
+  const [query, setQuery] = useState('"{city}" business email contact');
   const [results, setResults] = useState<Result[]>([]);
   const [status, setStatus] = useState("Ready");
   const [busy, setBusy] = useState(false);
