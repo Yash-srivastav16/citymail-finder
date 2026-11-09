@@ -3,7 +3,8 @@
   "name": "CityMail Finder",
   "version": "1.0.0",
   "description": "Find publicly published business contact emails from business websites.",
-  "permissions": ["storage", "unlimitedStorage"],
+  "permissions": ["storage", "unlimitedStorage", "tabs"],
   "host_permissions": ["https://*.vercel.app/*"],
-  "action": { "default_title": "Open CityMail Finder", "default_popup": "index.html" }
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Open CityMail Finder" }
 }
