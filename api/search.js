@@ -35,19 +35,61 @@ function emails(s) {
   return [...new Set((String(s).match(emailRx) || []).map(x => x.replace(/[),.;:]+$/, "").toLowerCase()))]
     .filter(x => x.length < 255 && !/\.(png|jpe?g|gif|svg|webp|css|js)$/i.test(x) && !/^(example|test)@/i.test(x));
 }
-async function searchProvider(query) {
+function retryAfterMs(value) {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const date = Date.parse(value);
+  return Number.isNaN(date) ? null : Math.max(0, date - Date.now());
+}
+
+async function searchProvider(query, city = "") {
   if (process.env.FREESEA_API_KEY) {
-    const raw = await fetch("https://freesea.dev/v1/search", {
-      method: "POST",
-      headers: {
-        "Authorization": "Bearer " + process.env.FREESEA_API_KEY,
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-      },
-      body: JSON.stringify({ query }),
-      signal: AbortSignal.timeout(15000)
-    });
-    if (!raw.ok) throw new Error("Freesea search returned HTTP " + raw.status);
+    const endpoint = "https://freesea.dev/v1/search";
+    let raw;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const startedAt = Date.now();
+      raw = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + process.env.FREESEA_API_KEY,
+          "Content-Type": "application/json",
+          "Accept": "application/json"
+        },
+        body: JSON.stringify({ query }),
+        signal: AbortSignal.timeout(15000)
+      });
+
+      if (raw.ok) {
+        console.info("[citymail] provider_response", JSON.stringify({
+          provider: "Freesea", city, status: raw.status,
+          attempt: attempt + 1, durationMs: Date.now() - startedAt
+        }));
+        break;
+      }
+
+      const responseText = (await raw.text()).slice(0, 1200);
+      const retryHeader = raw.headers.get("retry-after");
+      const waitMs = retryAfterMs(retryHeader);
+      console.warn("[citymail] provider_error", JSON.stringify({
+        provider: "Freesea", city, status: raw.status,
+        attempt: attempt + 1, durationMs: Date.now() - startedAt,
+        retryAfter: retryHeader, responseBody: responseText
+      }));
+
+      // Make at most one short retry. Longer Retry-After values are returned
+      // to the client instead of keeping a serverless function running.
+      if (raw.status === 429 && attempt === 0 && waitMs !== null && waitMs <= 2000) {
+        await new Promise(resolve => setTimeout(resolve, waitMs));
+        continue;
+      }
+
+      const detail = responseText.replace(/\\s+/g, " ").trim();
+      const retryMessage = retryHeader ? "; Retry-After: " + retryHeader : "";
+      throw new Error("Freesea search returned HTTP " + raw.status + retryMessage +
+        (detail ? "; provider response: " + detail : ""));
+    }
+
     const body = await raw.json();
     const results = Array.isArray(body.results) ? body.results : [];
     return results
@@ -93,7 +135,8 @@ export default async function handler(req, res) {
   if (typeof city !== "string" || !city.trim() || typeof query !== "string" || query.length > 400 || !query.trim()) return res.status(400).json({ error: "Provide a city and a search query (maximum 400 characters)." });
   try {
     const found = new Map();
-    const items = await searchProvider(query.trim());
+    console.info("[citymail] search_started", JSON.stringify({ city, template, provider: process.env.FREESEA_API_KEY ? "Freesea" : process.env.SEARXNG_URL ? "SearXNG" : process.env.TAVILY_API_KEY ? "Tavily" : "none" }));
+    const items = await searchProvider(query.trim(), city);
     for (const item of items) {
       const u = await safeUrl(item.url);
       if (!u) continue;
@@ -104,6 +147,7 @@ export default async function handler(req, res) {
     }
     return res.status(200).json({ ok: true, provider: process.env.FREESEA_API_KEY ? "Freesea" : process.env.SEARXNG_URL ? "SearXNG" : "Tavily", count: found.size, results: [...found.values()] });
   } catch (e) {
+    console.error("[citymail] search_failed", JSON.stringify({ city, template, message: e.message || "Search failed" }));
     return res.status(502).json({ error: e.message || "Search failed" });
   }
 }
