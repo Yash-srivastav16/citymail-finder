@@ -1,7 +1,5 @@
 import dns from "node:dns/promises";
 import net from "node:net";
-import * as cheerio from "cheerio";
-import robotsParser from "robots-parser";
 
 const UA = "CityMailFinder/1.0 (+public business contact discovery; respects robots.txt)";
 const emailRx = /[A-Z0-9.!#$%&'*+/=?^`_{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/gi;
@@ -37,18 +35,6 @@ function emails(s) {
   return [...new Set((String(s).match(emailRx) || []).map(x => x.replace(/[),.;:]+$/, "").toLowerCase()))]
     .filter(x => x.length < 255 && !/\.(png|jpe?g|gif|svg|webp|css|js)$/i.test(x) && !/^(example|test)@/i.test(x));
 }
-async function fetchText(url, accept = "text/html,application/xhtml+xml") {
-  const safe = await safeUrl(url);
-  if (!safe) return null;
-  try {
-    const r = await fetch(safe, { redirect: "manual", headers: { "User-Agent": UA, Accept: accept }, signal: AbortSignal.timeout(7000) });
-    if (!r.ok || r.status >= 300 || !((r.headers.get("content-type") || "").includes("text/html") || accept.includes("application/json") && (r.headers.get("content-type") || "").includes("json"))) return null;
-    const len = Number(r.headers.get("content-length") || 0);
-    if (len > 1_500_000) return null;
-    const t = await r.text();
-    return t.length <= 1_500_000 ? t : null;
-  } catch { return null; }
-}
 async function searchProvider(query) {
   if (process.env.SEARXNG_URL) {
     const u = new URL("/search", process.env.SEARXNG_URL);
@@ -70,31 +56,6 @@ async function searchProvider(query) {
   }
   throw new Error("Configure SEARXNG_URL or TAVILY_API_KEY in Vercel environment variables.");
 }
-async function crawl(rawUrl, city, template) {
-  const start = await safeUrl(rawUrl);
-  if (!start) return [];
-  const robotsUrl = start.origin + "/robots.txt";
-  let robots = null;
-  try {
-    const rr = await fetch(robotsUrl, { redirect: "manual", headers: { "User-Agent": UA }, signal: AbortSignal.timeout(4000) });
-    if (rr.status >= 300 && rr.status < 400 || rr.status >= 500) return [];
-    if (rr.ok) robots = robotsParser(robotsUrl, await rr.text());
-  } catch { return []; }
-  const paths = [start.href, new URL("/contact", start.origin).href, new URL("/contact-us", start.origin).href];
-  const out = [];
-  for (const page of paths) {
-    if (robots && robots.isAllowed(page, "CityMailFinder") === false) continue;
-    const html = await fetchText(page);
-    if (!html) continue;
-    const $ = cheerio.load(html);
-    const mailto = $('a[href^="mailto:"]').map((_, a) => $(a).attr("href") || "").get().join(" ");
-    $("script,style,noscript,svg,iframe").remove();
-    for (const email of emails($("body").text() + " " + mailto)) {
-      out.push({ city, email, sourceUrl: page, domain: start.hostname, sourceType: "website", template, createdAt: new Date().toISOString() });
-    }
-  }
-  return out;
-}
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -113,8 +74,10 @@ export default async function handler(req, res) {
     for (const item of items) {
       const u = await safeUrl(item.url);
       if (!u) continue;
-      for (const email of emails(item.title + " " + item.description)) found.set(city.toLowerCase() + "|" + email, { city, email, sourceUrl: u.href, domain: u.hostname, sourceType: "search-result", template, createdAt: new Date().toISOString() });
-      for (const row of await crawl(u.href, city, template)) found.set(city.toLowerCase() + "|" + row.email, row);
+      const resultText = [item.title, item.description, item.url].filter(Boolean).join(" ");
+      for (const email of emails(resultText)) {
+        found.set(city.toLowerCase() + "|" + email, { city, email, sourceUrl: u.href, domain: u.hostname, sourceType: "search-result", template, createdAt: new Date().toISOString() });
+      }
     }
     return res.status(200).json({ ok: true, provider: process.env.SEARXNG_URL ? "SearXNG" : "Tavily", count: found.size, results: [...found.values()] });
   } catch (e) {
