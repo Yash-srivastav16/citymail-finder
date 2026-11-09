@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://yash-srivastav16.github.io/citymail-finder/sitemap.xml
