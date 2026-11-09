@@ -1,19 +1,30 @@
 # CityMail Finder
 
-Chrome extension for discovering publicly published business contact emails from business websites.
+Manifest V3 Chrome extension for finding publicly published business contact emails from public business websites.
+
+## Stack
+
+- React + TypeScript + Vite
+- Vercel serverless API routes
+- SearXNG free-first search provider; optional Tavily fallback
+- Chrome local browser storage for settings and IndexedDB for result records
+- XLSX export generated locally in the browser
+
+## Development
+
+```bash
+npm install
+npm run build
+```
+
+Load the generated `dist` folder in Chrome using Extensions → Developer mode → Load unpacked. Click the extension icon to open its workspace in a tab.
+
+Configure the deployed API URL in the app. Vercel environment variables are documented in `.env.example` and `VERCEL-SETUP.md`.
 
 ## Status
 
-Repository initialized. The application source has not yet been pushed. The Vercel serverless backend adaptation, security hardening, and end-to-end tests are still pending.
+Development implementation is committed. Build installation timed out in the current environment; live provider, Chrome end-to-end, and production security checks remain pending. Do not treat this repository as a production-ready release yet.
 
-## Planned architecture
+## Responsible use
 
-- Chrome Manifest V3 extension using React and TypeScript
-- Chrome local storage for settings and IndexedDB for collected results
-- Vercel serverless API for bounded search and crawling batches
-- Search-provider abstraction, with free-first provider support
-- Local Excel export
-
-## Security and responsible use
-
-Only process publicly accessible business websites. Respect robots.txt, website terms, and rate limits. Do not bypass logins, CAPTCHAs, paywalls, or other access controls. Protect backend routes against SSRF and abuse. Never commit API keys or secrets.
+Only process publicly accessible business contact information. Respect robots.txt, website terms, and rate limits. Never bypass logins, CAPTCHAs, paywalls, or access controls. Do not commit secrets or collected contact lists.
