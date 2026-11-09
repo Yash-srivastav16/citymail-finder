@@ -36,25 +36,48 @@ function emails(s) {
     .filter(x => x.length < 255 && !/\.(png|jpe?g|gif|svg|webp|css|js)$/i.test(x) && !/^(example|test)@/i.test(x));
 }
 async function searchProvider(query) {
+  if (process.env.FREESEA_API_KEY) {
+    const raw = await fetch("https://freesea.dev/v1/search", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + process.env.FREESEA_API_KEY,
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+      },
+      body: JSON.stringify({ query }),
+      signal: AbortSignal.timeout(15000)
+    });
+    if (!raw.ok) throw new Error("Freesea search returned HTTP " + raw.status);
+    const body = await raw.json();
+    const results = Array.isArray(body.results) ? body.results : [];
+    return results
+      .filter(x => x && x.type !== "sponsored")
+      .slice(0, 10)
+      .map(x => ({
+        url: x.url || x.link || "",
+        title: x.title || "",
+        description: x.snippet || x.description || x.content || ""
+      }));
+  }
   if (process.env.SEARXNG_URL) {
     const u = new URL("/search", process.env.SEARXNG_URL);
     u.searchParams.set("q", query); u.searchParams.set("format", "json");
     const raw = await fetch(u, { headers: { Accept: "application/json", "User-Agent": UA }, signal: AbortSignal.timeout(12000) });
     if (!raw.ok) throw new Error("SearXNG search provider returned HTTP " + raw.status);
     const body = await raw.json();
-    return (body.results || []).slice(0, 5).map(x => ({ url: x.url, title: x.title || "", description: x.content || "" }));
+    return (body.results || []).slice(0, 10).map(x => ({ url: x.url, title: x.title || "", description: x.content || "" }));
   }
   if (process.env.TAVILY_API_KEY) {
     const raw = await fetch("https://api.tavily.com/search", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ api_key: process.env.TAVILY_API_KEY, query, search_depth: "basic", max_results: 5 }),
+      body: JSON.stringify({ api_key: process.env.TAVILY_API_KEY, query, search_depth: "basic", max_results: 10 }),
       signal: AbortSignal.timeout(12000)
     });
     if (!raw.ok) throw new Error("Tavily returned HTTP " + raw.status);
     const body = await raw.json();
-    return (body.results || []).slice(0, 5).map(x => ({ url: x.url, title: x.title || "", description: x.content || "" }));
+    return (body.results || []).slice(0, 10).map(x => ({ url: x.url, title: x.title || "", description: x.content || "" }));
   }
-  throw new Error("Configure SEARXNG_URL or TAVILY_API_KEY in Vercel environment variables.");
+  throw new Error("Configure FREESEA_API_KEY, SEARXNG_URL or TAVILY_API_KEY in Vercel environment variables.");
 }
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
@@ -79,7 +102,7 @@ export default async function handler(req, res) {
         found.set(city.toLowerCase() + "|" + email, { city, email, sourceUrl: u.href, domain: u.hostname, sourceType: "search-result", template, createdAt: new Date().toISOString() });
       }
     }
-    return res.status(200).json({ ok: true, provider: process.env.SEARXNG_URL ? "SearXNG" : "Tavily", count: found.size, results: [...found.values()] });
+    return res.status(200).json({ ok: true, provider: process.env.FREESEA_API_KEY ? "Freesea" : process.env.SEARXNG_URL ? "SearXNG" : "Tavily", count: found.size, results: [...found.values()] });
   } catch (e) {
     return res.status(502).json({ error: e.message || "Search failed" });
   }
