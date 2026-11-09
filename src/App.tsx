@@ -66,12 +66,12 @@ export default function App() {
   const [cities, setCities] = useState<string[]>(JSON.parse(localStorage.getItem("cm-cities") || "[]"));
   const [cityInput, setCityInput] = useState("");
   const [query, setQuery] = useState('"\u007bcity\u007d" business email contact');
-  const [pages, setPages] = useState(Number(localStorage.getItem("cm-pages") || 50));
+  const [pages, setPages] = useState(Number(localStorage.getItem("cm-pages-v2") || 10));
   const [results, setResults] = useState<Result[]>([]);
   const [status, setStatus] = useState("Ready");
   const [busy, setBusy] = useState(false);
   useEffect(() => { readRows().then(setResults).catch(e => setStatus(e.message)); }, []);
-  useEffect(() => { localStorage.setItem("cm-cities", JSON.stringify(cities)); localStorage.setItem("cm-pages", String(pages)); }, [cities, pages]);
+  useEffect(() => { localStorage.setItem("cm-cities", JSON.stringify(cities)); localStorage.setItem("cm-pages-v2", String(pages)); }, [cities, pages]);
 
   async function importCities(file?: File) {
     if (!file) return;
