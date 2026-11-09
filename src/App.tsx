@@ -3,7 +3,7 @@ import * as XLSX from "xlsx";
 
 type Result = { city: string; email: string; sourceUrl: string; domain: string; sourceType: string; createdAt: string };
 const DB = "citymail-finder";
-const emailRx = /[A-Z0-9.!#$%&'*+/=?^`_{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/gi;
+const emailRx = /[A-Z0-9.!#$%&'*+/=?^`_{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/gi;
 
 function dbOpen(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -37,6 +37,17 @@ function waitForTab(tabId: number): Promise<void> {
       }
     };
     chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.get(tabId).then(tab => {
+      if (tab.status === "complete") {
+        window.clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve();
+      }
+    }).catch(error => {
+      window.clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(listener);
+      reject(error);
+    });
   });
 }
 async function extractVisibleEmails(tabId: number) {
@@ -45,7 +56,7 @@ async function extractVisibleEmails(tabId: number) {
     func: () => {
       const text = document.body?.innerText || "";
       const captcha = /unusual traffic|automated queries|not a robot|our systems have detected|sorry\/.*computer network/i.test(text);
-      const emails = [...new Set((text.match(/[A-Z0-9.!#$%&'*+/=?^`_{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/gi) || []).map(x => x.toLowerCase()))];
+      const emails = [...new Set((text.match(/[A-Z0-9.!#$%&'*+/=?^`_{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/gi) || []).map(x => x.toLowerCase()))];
       return { captcha, emails, title: document.title, url: location.href };
     }
   });
@@ -75,7 +86,7 @@ export default function App() {
     } catch (e) { setStatus("Excel import failed: " + (e as Error).message); }
   }
   function addCities() {
-    const next = cityInput.split(/[\\n,;]+/).map(x => x.trim()).filter(Boolean);
+    const next = cityInput.split(/[\n,;]+/).map(x => x.trim()).filter(Boolean);
     setCities(old => [...new Set([...old, ...next])]); setCityInput("");
   }
   async function run() {
