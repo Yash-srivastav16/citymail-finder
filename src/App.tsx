@@ -95,10 +95,19 @@ export default function App() {
     let tabId: number | undefined;
     let total = 0;
     let keepTabOpen = false;
+    const checkpointKey = "cm-search-checkpoint-v1";
+    const saved = JSON.parse(localStorage.getItem(checkpointKey) || "null") as { cityIndex: number; pageIndex: number } | null;
+    const startCityIndex = saved?.cityIndex ?? 0;
+    const startPageIndex = saved?.pageIndex ?? 0;
     try {
-      for (const city of cities) {
+      for (let cityIndex = startCityIndex; cityIndex < cities.length; cityIndex++) {
+        const city = cities[cityIndex];
+        const firstPage = cityIndex === startCityIndex ? startPageIndex : 0;
         const search = query.replaceAll("{city}", city).trim();
-        for (let page = 0; page < Math.min(50, Math.max(1, pages)); page++) {
+        for (let page = firstPage; page < Math.min(50, Math.max(1, pages)); page++) {
+          // Save the exact page before opening it. If Google interrupts the run,
+          // the next Start click retries this page instead of restarting the batch.
+          localStorage.setItem(checkpointKey, JSON.stringify({ cityIndex, pageIndex: page }));
           const url = "https://www.google.com/search?q=" + encodeURIComponent(search) + "&num=10&filter=0&start=" + (page * 10);
           setStatus("Opening Google · " + city + " · page " + (page + 1) + "/" + pages);
           if (tabId === undefined) {
@@ -132,7 +141,7 @@ export default function App() {
               }
             }
             if (pageData.captcha) {
-              setStatus("Still waiting for Google verification at " + city + ", page " + (page + 1) + ". Start again after completing the challenge.");
+              setStatus("Google verification is still showing at " + city + ", page " + (page + 1) + ". Solve it in the open Google tab, then click Start / Resume. The batch will continue from this page.");
               return;
             }
           }
@@ -140,9 +149,12 @@ export default function App() {
           if (rows.length) {
             await saveRows(rows); total += rows.length; setResults(await readRows());
           }
+          // Mark the next page as the resume point only after this page is processed.
+          localStorage.setItem(checkpointKey, JSON.stringify({ cityIndex, pageIndex: page + 1 }));
           if (page > 0 && pageData.emails.length === 0 && /did not match any documents|no results found/i.test(pageData.title)) break;
         }
       }
+      localStorage.removeItem(checkpointKey);
       setStatus("Finished. Found " + total + " email matches; duplicates are removed.");
     } catch (e) {
       setStatus("Stopped: " + (e as Error).message);
@@ -165,7 +177,7 @@ export default function App() {
     <section><h2>Import cities</h2><label>Upload .xlsx or .csv (column name: City)<input type="file" accept=".xlsx,.xls,.csv" onChange={e => importCities(e.target.files?.[0])}/></label></section>
     <section><h2>Cities</h2><textarea value={cityInput} onChange={e => setCityInput(e.target.value)} placeholder="Add cities, one per line or comma separated"/><button onClick={addCities}>Add cities</button><p>{cities.length} cities loaded</p><ul>{cities.map(city => <li key={city}>{city}</li>)}</ul></section>
     <section><h2>Google search settings</h2><label>Search query (use {"{city}"} where city name should appear)<input value={query} onChange={e => setQuery(e.target.value)}/></label><label>Pages per city (1–50)<input type="number" min="1" max="50" value={pages} onChange={e => setPages(Math.min(50, Math.max(1, Number(e.target.value) || 1)))}/></label><p>Searches run page by page with a delay. Only emails visible on Google result pages are collected; business websites are not crawled.</p></section>
-    <section><h2>Run</h2><button disabled={busy || !cities.length} onClick={run}>{busy ? "Searching Google…" : "Start automatic search"}</button><button disabled={busy || !results.length} onClick={exportExcel}>Export emails only</button><p role="status">{status}</p><p>{new Set(results.map(r => r.email.toLowerCase())).size} unique email addresses saved locally</p></section>
+    <section><h2>Run</h2><button disabled={busy || !cities.length} onClick={run}>{busy ? "Searching Google…" : "Start / Resume search"}</button><button disabled={busy || !results.length} onClick={exportExcel}>Export emails only</button><p role="status">{status}</p><p>{new Set(results.map(r => r.email.toLowerCase())).size} unique email addresses saved locally</p></section>
     <section><h2>Collected emails</h2><div className="table"><table><thead><tr><th>Email</th></tr></thead><tbody>{[...new Set(results.map(r => r.email.toLowerCase()))].map(email => <tr key={email}><td>{email}</td></tr>)}</tbody></table></div></section>
     <footer>Uses Google search results in your browser. Google may limit automated requests or show verification; the extension stops rather than bypassing it.</footer>
   </main>;
