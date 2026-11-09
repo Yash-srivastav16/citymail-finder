@@ -111,7 +111,8 @@ export default async function handler(req, res) {
   try {
     const found = new Map();
     console.info("[citymail] search_started", JSON.stringify({ city, template, provider: process.env.FREESEA_API_KEY ? "Freesea" : process.env.SEARXNG_URL ? "SearXNG" : process.env.TAVILY_API_KEY ? "Tavily" : "none" }));
-    const searched = await searchProvider(query.trim(), city);\n    const items = searched.items;
+    const searched = await searchProvider(query.trim(), city);
+    const items = searched.items;
     for (const item of items) {
       const u = await safeUrl(item.url);
       if (!u) continue;
