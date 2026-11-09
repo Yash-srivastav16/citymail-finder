@@ -92,7 +92,7 @@ export default function App() {
         await sleep(12000 + Math.floor(Math.random() * 8000));
         setStatus("Searching " + city + " · " + t.name);
         const payload = { city, query: t.query.replaceAll("{city}", city), template: t.name };
-        const r = await fetch(api.replace(/\\/$/, "") + "/api/search", { method: "POST", headers, body: JSON.stringify(payload) });
+        const r = await fetch(api.replace(/\/$/, "") + "/api/search", { method: "POST", headers, body: JSON.stringify(payload) });
         const b = await r.json().catch(() => ({}));
         const errorText = String(b.error || "");
         const needsPause = r.status === 429 || b.code === "RATE_LIMITED" || b.code === "CAPTCHA_REQUIRED" ||
@@ -105,7 +105,7 @@ export default function App() {
           setPaused(false); setResumeWait(null); setPausedCity(""); setPauseReason("");
           setStatus("Cooling down for 60 seconds before retrying " + city + "…");
           await sleep(60000);
-          const retry = await fetch(api.replace(/\\/$/, "") + "/api/search", { method: "POST", headers, body: JSON.stringify(payload) });
+          const retry = await fetch(api.replace(/\/$/, "") + "/api/search", { method: "POST", headers, body: JSON.stringify(payload) });
           const retryBody = await retry.json().catch(() => ({}));
           if (!retry.ok) throw new Error(retryBody.error || "Search failed after manual resume. Queue stopped safely.");
           await saveRows(retryBody.results || []); count += retryBody.count || 0; setResults(await readRows());
