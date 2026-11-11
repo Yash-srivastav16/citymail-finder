@@ -19,6 +19,22 @@ async function saveRows(rows: Result[]) {
     tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error);
   });
 }
+async function deleteRow(email: string) {
+  const db = await dbOpen();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction("results", "readwrite");
+    tx.objectStore("results").delete(email.toLowerCase());
+    tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error);
+  });
+}
+async function clearRows() {
+  const db = await dbOpen();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction("results", "readwrite");
+    tx.objectStore("results").clear();
+    tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error);
+  });
+}
 async function readRows(): Promise<Result[]> {
   const db = await dbOpen();
   return new Promise((resolve, reject) => {
@@ -87,6 +103,37 @@ export default function App() {
   function addCities() {
     const next = cityInput.split(/[\n,;]+/).map(x => x.trim()).filter(Boolean);
     setCities(old => [...new Set([...old, ...next])]); setCityInput("");
+  }
+  function removeCity(city: string) {
+    setCities(old => old.filter(item => item !== city));
+    localStorage.removeItem("cm-search-checkpoint-v1");
+    setStatus("Removed city: " + city + ". Search progress was reset; start again when ready.");
+  }
+  function clearCities() {
+    if (!window.confirm("Remove all saved cities? Collected emails will be kept.")) return;
+    setCities([]);
+    localStorage.removeItem("cm-search-checkpoint-v1");
+    setStatus("All cities removed. Collected emails are still saved.");
+  }
+  async function removeEmail(email: string) {
+    await deleteRow(email);
+    setResults(await readRows());
+    setStatus("Removed " + email);
+  }
+  async function clearEmails() {
+    if (!window.confirm("Delete all collected email addresses? This cannot be undone.")) return;
+    await clearRows();
+    setResults([]);
+    setStatus("All collected emails deleted.");
+  }
+  async function clearAllData() {
+    if (!window.confirm("Delete all saved cities, collected emails, and search progress? This cannot be undone.")) return;
+    await clearRows();
+    setResults([]);
+    setCities([]);
+    setCityInput("");
+    localStorage.removeItem("cm-search-checkpoint-v1");
+    setStatus("All saved cities, emails, and search progress have been cleared.");
   }
   async function run() {
     if (!cities.length) { setStatus("Import or add at least one city."); return; }
@@ -175,10 +222,11 @@ export default function App() {
   return <main className="app">
     <header><h1>CityMail Finder</h1><p>Automatically collect email addresses visible in Google search results</p></header>
     <section><h2>Import cities</h2><label>Upload .xlsx or .csv (column name: City)<input type="file" accept=".xlsx,.xls,.csv" onChange={e => importCities(e.target.files?.[0])}/></label></section>
-    <section><h2>Cities</h2><textarea value={cityInput} onChange={e => setCityInput(e.target.value)} placeholder="Add cities, one per line or comma separated"/><button onClick={addCities}>Add cities</button><p>{cities.length} cities loaded</p><ul>{cities.map(city => <li key={city}>{city}</li>)}</ul></section>
+    <section><h2>Cities</h2><textarea value={cityInput} onChange={e => setCityInput(e.target.value)} placeholder="Add cities, one per line or comma separated"/><button onClick={addCities}>Add cities</button><button className="secondary" disabled={!cities.length || busy} onClick={clearCities}>Remove all cities</button><p>{cities.length} cities loaded</p><ul className="managed-list">{cities.map(city => <li key={city}><span>{city}</span><button className="danger small" disabled={busy} onClick={() => removeCity(city)}>Remove</button></li>)}</ul></section>
     <section><h2>Google search settings</h2><label>Search query (use {"{city}"} where city name should appear)<input value={query} onChange={e => setQuery(e.target.value)}/></label><label>Pages per city (1–50)<input type="number" min="1" max="50" value={pages} onChange={e => setPages(Math.min(50, Math.max(1, Number(e.target.value) || 1)))}/></label><p>Searches run page by page with a delay. Only emails visible on Google result pages are collected; business websites are not crawled.</p></section>
     <section><h2>Run</h2><button disabled={busy || !cities.length} onClick={run}>{busy ? "Searching Google…" : "Start / Resume search"}</button><button disabled={busy || !results.length} onClick={exportExcel}>Export emails only</button><p role="status">{status}</p><p>{new Set(results.map(r => r.email.toLowerCase())).size} unique email addresses saved locally</p></section>
-    <section><h2>Collected emails</h2><div className="table"><table><thead><tr><th>Email</th></tr></thead><tbody>{[...new Set(results.map(r => r.email.toLowerCase()))].map(email => <tr key={email}><td>{email}</td></tr>)}</tbody></table></div></section>
+    <section><h2>Collected emails</h2><button className="danger" disabled={busy || !results.length} onClick={clearEmails}>Delete all emails</button><div className="table"><table><thead><tr><th>Email</th><th>Action</th></tr></thead><tbody>{[...new Set(results.map(r => r.email.toLowerCase()))].map(email => <tr key={email}><td>{email}</td><td><button className="danger small" disabled={busy} onClick={() => removeEmail(email)}>Remove</button></td></tr>)}</tbody></table></div></section>
+    <section><h2>Storage management</h2><p>Remove all saved cities, collected emails, and the saved search checkpoint from this browser.</p><button className="danger" disabled={busy} onClick={clearAllData}>Clear all saved data</button></section>
     <footer>Uses Google search results in your browser. Google may limit automated requests or show verification; the extension stops rather than bypassing it.</footer>
   </main>;
 }
