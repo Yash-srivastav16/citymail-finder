@@ -132,8 +132,10 @@ export default function App() {
     setResults([]);
     setCities([]);
     setCityInput("");
+    setQuery('"\u007bcity\u007d" business email contact');
+    setPages(10);
     localStorage.removeItem("cm-search-checkpoint-v1");
-    setStatus("All saved cities, emails, and search progress have been cleared.");
+    setStatus("All saved cities, emails, search settings, and search progress have been cleared.");
   }
   async function run() {
     if (!cities.length) { setStatus("Import or add at least one city."); return; }
