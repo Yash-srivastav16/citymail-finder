@@ -20,14 +20,10 @@ jobs:
           test -f dist/background.js
           test -f dist/icons/citymail-128.png
           node -e "const m=require('./dist/manifest.json'); if(m.manifest_version!==3) process.exit(1); for (const p of Object.values(m.icons||{})) { if (!require('fs').existsSync('dist/'+p)) throw new Error('Missing icon: '+p); }"
-      - name: Create upload-ready extension ZIP
-        run: |
-          cd dist
-          zip -r ../citymail-finder-v1.1.2.zip .
-      - name: Upload extension ZIP
+      - name: Upload Chrome Web Store-ready extension files
         uses: actions/upload-artifact@v4
         with:
-          name: citymail-finder-v1.1.2
-          path: citymail-finder-v1.1.2.zip
+          name: citymail-finder-v1.1.2-unpacked
+          path: dist/
           if-no-files-found: error
           retention-days: 14
