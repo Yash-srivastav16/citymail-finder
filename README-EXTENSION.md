@@ -4,7 +4,7 @@
 
 CityMail Finder is a Manifest V3 Chrome extension. It accepts a city list (CSV/XLSX with a `City` column or manual entry), builds a configurable Google Search query for each city, opens result pages, extracts email-shaped strings from visible result-page text, deduplicates addresses in local IndexedDB, and exports unique addresses to an Excel workbook.
 
-The extension does **not** crawl linked business websites, verify email deliverability, send email, upload collected results to a CityMail Finder server, or solve/bypass CAPTCHA. If a Google verification challenge appears, the user must complete it manually.
+The extension does **not** crawl linked business websites, verify email ownership or deliverability, confirm that an address belongs to a particular business, send email, upload collected results to a CityMail Finder server, or solve/bypass CAPTCHA. Every extracted email-shaped string is an **unverified match**. Users must independently verify the address and its business association before relying on it or contacting anyone. If a Google CAPTCHA or other verification challenge appears, the user must complete it manually in the Google tab. The extension may resume after the challenge is cleared; if it remains paused, the user must click Start / Resume. The extension never automates, solves, bypasses, or circumvents a challenge.
 
 **Important:** this workflow automates Google Search queries and reads Google result pages. Google states that automated queries/scraping without express permission are not allowed. A Chrome Web Store review or listing is not permission from Google and does not establish compliance with Google's terms. Do not publish or distribute this workflow as Google-approved. Obtain express permission or replace the search source with a provider whose terms explicitly allow the intended automated access before commercial operation. Never try to evade rate limits, CAPTCHA, or other access controls.
 
@@ -25,7 +25,7 @@ The production extension is generated in `dist/`.
 2. Open `chrome://extensions`.
 3. Enable **Developer mode**.
 4. Select **Load unpacked** and choose the generated `dist` directory.
-5. Test importing cities, adding/removing cities, search execution, manual verification pause/resume, deduplication, deletion, and Excel export.
+5. Test importing cities, adding/removing cities, search execution, manual CAPTCHA handling and resume, the unverified-results disclosure, deduplication, deletion, and Excel export.
 
 Do not load the repository root; load `dist`.
 
