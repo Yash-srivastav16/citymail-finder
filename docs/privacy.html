@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Privacy Policy | CityMail Finder</title>
-  <meta name="description" content="Read how CityMail Finder handles city lists, search activity and email results stored by the browser extension.">
+  <meta name="description" content="How the CityMail Finder Chrome extension handles city lists, Google Search activity and locally stored email results.">
   <meta name="robots" content="index,follow">
   <link rel="canonical" href="https://yash-srivastav16.github.io/citymail-finder/privacy.html">
   <link rel="icon" href="./favicon.svg" type="image/svg+xml">
@@ -15,26 +15,42 @@
   <main class="section">
     <p class="eyebrow">LEGAL & TRANSPARENCY</p>
     <h1>CityMail Finder Privacy Policy</h1>
-    <p><strong>Last updated: 9 November 2026</strong></p>
-    <p>This policy describes the current browser extension behaviour in the CityMail Finder repository. It should be reviewed and updated if the product adds accounts, analytics, cloud storage, payments or additional search providers.</p>
-    <h2>Information you provide</h2>
-    <p>You may enter city names, configure search queries and import a CSV or Excel file containing a City column. The extension processes this information to perform the search workflow you initiate.</p>
-    <h2>Search activity</h2>
-    <p>When you start a search, the extension opens Google Search pages in your browser. Your browser sends search requests to Google. Google may process those requests under its own privacy policy and terms.</p>
-    <h2>Collected results and local storage</h2>
-    <p>Email addresses visible in Google search result page text are collected by the extension. The current extension stores result records in your browser's IndexedDB and saves city settings, page settings and search progress in browser local storage. The current extension workflow does not upload the collected email list to a CityMail Finder account or server.</p>
-    <h2>CAPTCHA and verification</h2>
-    <p>If Google displays a verification challenge, the workflow pauses and you must complete the challenge yourself in the browser. CityMail Finder does not solve or bypass CAPTCHA challenges.</p>
+    <p><strong>Last updated: 12 November 2026</strong></p>
+    <p>This policy describes the current CityMail Finder browser extension. It must be kept in sync with every released build. If the product adds accounts, analytics, cloud storage, payments or another search provider, this policy and the Web Store disclosures must be updated before release.</p>
+
+    <h2>Information processed</h2>
+    <p>You may provide city names by typing them or importing a CSV/Excel file with a City column. You may configure a search query and the number of result pages. When you run the search workflow, the extension uses these inputs to construct Google Search requests.</p>
+    <p>The extension extracts email-shaped text visible in Google Search result pages. Result records include the email string, associated city, source page URL, source type and creation timestamp. The extension does not verify whether an address is active or belongs to a particular business.</p>
+
+    <h2>Google Search and third-party processing</h2>
+    <p>The extension opens Google Search pages in your browser and automatically navigates through the configured result pages. Your browser sends those search requests to Google. Google may collect and process search queries, device/browser information and other data under Google's own terms and privacy policy. CityMail Finder does not control Google's data handling.</p>
+    <p>The extension reads visible text from Google Search result pages using its scripting permission. It does not crawl the linked business websites. Google may restrict automated queries or display verification challenges. You must complete any challenge yourself; CityMail Finder does not solve or bypass CAPTCHA or other access controls.</p>
+
+    <h2>Local storage and data transmission</h2>
+    <p>CityMail Finder stores collected result records in the extension's browser IndexedDB database. It stores city settings, search query, page-count setting and search-resume progress in browser local storage. The current extension code does not upload the collected email list or city list to a CityMail Finder server and does not require a CityMail Finder account.</p>
+    <p>When you export, the browser downloads an Excel file to a location you choose. The exported file is outside the extension's local database; protect it appropriately.</p>
+
     <h2>Permissions</h2>
-    <p>The extension requests browser storage permissions to retain settings and results, tabs permission to open and manage search tabs, and scripting permission to read visible text on the Google Search pages used by the workflow. Review the extension manifest in the public repository for the current permission list.</p>
-    <h2>Data sharing and sale</h2>
-    <p>CityMail Finder does not sell the result list or transmit it to a CityMail Finder account in the current extension workflow. Search requests are made to Google from your browser. Do not collect, export or use personal data in ways that violate applicable privacy, data protection, anti-spam or marketing laws.</p>
+    <ul>
+      <li><strong>tabs:</strong> open, monitor, update and close the Google Search tab used by the workflow.</li>
+      <li><strong>scripting:</strong> read visible text from the Google Search result page to identify email-shaped strings.</li>
+      <li><strong>unlimitedStorage:</strong> retain the local IndexedDB result collection without the usual extension storage quota restrictions.</li>
+      <li><strong>https://www.google.com/search* host access:</strong> allow the extension to run its page-reading script on Google Search result pages.</li>
+    </ul>
+    <p>The extension also uses browser local storage and IndexedDB within its own extension page. Review the shipped manifest and code for the exact permissions in a given release.</p>
+
+    <h2>Sharing and sale</h2>
+    <p>The current extension code does not sell or transmit the collected result list to CityMail Finder. Search requests are sent to Google by your browser as described above. Do not collect, export, disclose or use personal data in ways that violate applicable privacy, data protection, anti-spam or marketing laws.</p>
+
     <h2>Retention and deletion</h2>
-    <p>Results remain in the browser's local extension storage until you clear the extension's stored data or remove the extension and its data through your browser. You are responsible for handling exported spreadsheets securely.</p>
+    <p>City and query settings and collected results remain in the browser until you delete them using the controls in the extension or remove the extension and its data through Chrome. You can remove individual email records, delete all collected emails, or clear all saved data in the app. You are responsible for deleting exported files from your device when no longer needed.</p>
+
     <h2>Children</h2>
     <p>CityMail Finder is a business research tool and is not designed for children.</p>
+
     <h2>Changes to this policy</h2>
     <p>This policy may be updated when the extension's functionality or data handling changes. The latest version will be published on this page.</p>
+
     <h2>Contact and support</h2>
     <p>For questions or to report an issue, use the <a href="https://github.com/Yash-srivastav16/citymail-finder/issues">CityMail Finder GitHub Issues page</a>.</p>
     <p><a href="./">← Back to CityMail Finder</a></p>
