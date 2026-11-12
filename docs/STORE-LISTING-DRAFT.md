@@ -19,7 +19,7 @@ CityMail Finder helps organize business-contact research by city.
 - Export unique email matches to an Excel workbook.
 - Remove individual results or clear saved data.
 
-**Important workflow disclosure:** The current build automatically opens and navigates Google Search result pages and reads visible result text. Google may display verification challenges; users must complete them manually. The extension does not crawl linked business websites, verify deliverability, or send email. Search results may be incomplete or inaccurate.
+**Important workflow disclosure:** The current build automatically opens and navigates Google Search result pages and reads visible result text. If Google displays a CAPTCHA or verification challenge, users must complete it manually in the Google tab. CityMail Finder does not automate, solve, bypass, or circumvent verification. If the challenge remains, users can click Start / Resume after completing it manually. The extension does not crawl linked business websites or send email. **All extracted email addresses are unverified matches**: the extension does not verify mailbox existence, ownership, deliverability, or business association. Users must independently verify each address before relying on it or contacting anyone. Search results may be incomplete or inaccurate.
 
 **Data handling:** City lists, settings, progress and collected results are stored in the browser. The current build does not upload the collected list to a CityMail Finder server. Search requests are sent directly from the browser to Google, which handles them under its own policies.
 
