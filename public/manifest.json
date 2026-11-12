@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "CityMail Finder",
-  "version": "1.1.1",
-  "description": "Research email addresses visible in Google Search results by city. Deduplicate and export locally.",
+  "version": "1.1.2",
+  "description": "Collect visible email matches from Google Search results by city. Manual CAPTCHA handling; email matches are unverified.",
   "permissions": [
     "unlimitedStorage",
     "tabs",
