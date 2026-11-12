@@ -28,7 +28,9 @@ Run these tests against the exact ZIP generated from the final commit, in a clea
 - [ ] Confirm next-page navigation and resume checkpoint behaviour.
 - [ ] Confirm a failed navigation produces a useful status and does not silently skip data.
 - [ ] Confirm duplicate email matches are deduplicated case-insensitively.
-- [ ] Confirm a challenge/verification page is not bypassed; the workflow stops safely and explains the manual next step.
+- [ ] Confirm CAPTCHA/verification challenges require the user to solve them manually in the Google tab; no automated solving, bypass, or circumvention occurs.
+- [ ] Confirm the user can resume after manually clearing a challenge, and that a still-visible challenge leaves the workflow paused with clear instructions.
+- [ ] Confirm the UI and store description clearly state that every extracted email match is unverified and must be independently checked for validity, deliverability, and business association.
 - [ ] Confirm stopping/closing Chrome does not corrupt saved results.
 - [ ] Confirm no hidden or unexpected background requests occur.
 
