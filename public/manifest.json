@@ -1,10 +1,9 @@
 {
   "manifest_version": 3,
   "name": "CityMail Finder",
-  "version": "1.1.0",
-  "description": "Research business emails visible in Google results by city. Deduplicate and export addresses to Excel.",
+  "version": "1.1.1",
+  "description": "Research email addresses visible in Google Search results by city. Deduplicate and export locally.",
   "permissions": [
-    "storage",
     "unlimitedStorage",
     "tabs",
     "scripting"
