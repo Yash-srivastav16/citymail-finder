@@ -16,5 +16,11 @@
   },
   "action": {
     "default_title": "Open CityMail Finder"
+  },
+  "icons": {
+    "16": "icons/citymail-128.png",
+    "32": "icons/citymail-128.png",
+    "48": "icons/citymail-128.png",
+    "128": "icons/citymail-128.png"
   }
 }
