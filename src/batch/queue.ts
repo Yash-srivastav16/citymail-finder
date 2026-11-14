@@ -5,6 +5,7 @@ export type BatchJob = {
   location: string;
   status: BatchJobStatus;
   collectedCount: number;
+  pageIndex: number;
   error?: string;
 };
 
@@ -39,6 +40,7 @@ export function createBatchJobs(locations: string[]): BatchJob[] {
       location,
       status: "pending" as const,
       collectedCount: 0,
+      pageIndex: 0,
     }));
 }
 
@@ -59,7 +61,9 @@ export function getBatchProgress(jobs: BatchJob[]): BatchProgress {
 }
 
 export function getNextRunnableJobIndex(jobs: BatchJob[], fromIndex = 0): number {
-  return jobs.findIndex((job, index) => index >= fromIndex && (job.status === "pending" || job.status === "paused"));
+  return jobs.findIndex((job, index) =>
+    index >= fromIndex && (job.status === "pending" || job.status === "paused")
+  );
 }
 
 export function createCheckpoint(jobs: BatchJob[], activeJobIndex: number): BatchCheckpoint {
@@ -71,25 +75,41 @@ export function createCheckpoint(jobs: BatchJob[], activeJobIndex: number): Batc
   };
 }
 
+function isBatchJob(value: unknown): value is BatchJob {
+  if (!value || typeof value !== "object") return false;
+  const job = value as Record<string, unknown>;
+  return typeof job.id === "string" &&
+    typeof job.location === "string" &&
+    ["pending", "running", "completed", "paused", "failed"].includes(String(job.status)) &&
+    typeof job.collectedCount === "number" && Number.isFinite(job.collectedCount) &&
+    job.collectedCount >= 0 &&
+    typeof job.pageIndex === "number" && Number.isInteger(job.pageIndex) && job.pageIndex >= 0 &&
+    (job.error === undefined || typeof job.error === "string");
+}
+
 export function parseCheckpoint(value: string | null): BatchCheckpoint | null {
   if (!value) return null;
-
   try {
     const parsed: unknown = JSON.parse(value);
-    if (
-      typeof parsed !== "object" ||
-      parsed === null ||
-      !("version" in parsed) ||
-      parsed.version !== 1 ||
-      !("jobs" in parsed) ||
-      !Array.isArray(parsed.jobs) ||
-      !("activeJobIndex" in parsed) ||
-      typeof parsed.activeJobIndex !== "number"
-    ) {
-      return null;
-    }
+    if (!parsed || typeof parsed !== "object") return null;
+    const checkpoint = parsed as Record<string, unknown>;
+    if (checkpoint.version !== 1 ||
+      !Array.isArray(checkpoint.jobs) ||
+      !checkpoint.jobs.every(isBatchJob) ||
+      typeof checkpoint.activeJobIndex !== "number" ||
+      !Number.isInteger(checkpoint.activeJobIndex) ||
+      checkpoint.activeJobIndex < 0 ||
+      (checkpoint.jobs.length > 0 && checkpoint.activeJobIndex >= checkpoint.jobs.length) ||
+      typeof checkpoint.updatedAt !== "string") return null;
 
-    return parsed as BatchCheckpoint;
+    return {
+      version: 1,
+      jobs: checkpoint.jobs.map((job) =>
+        job.status === "running" ? { ...job, status: "paused" as const } : job
+      ),
+      activeJobIndex: checkpoint.activeJobIndex,
+      updatedAt: checkpoint.updatedAt,
+    };
   } catch {
     return null;
   }
