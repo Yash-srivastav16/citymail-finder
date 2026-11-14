@@ -354,7 +354,8 @@ export default function App() {
             if (tab.status !== "complete") await waitForTab(googleTabId);
           }
 
-          let completedBatches = Math.max(0, startPageIndex);\n          for (let page = Math.max(0, startPageIndex); page < maxPages; page++) {
+          let completedBatches = Math.max(0, startPageIndex);
+          for (let page = Math.max(0, startPageIndex); page < maxPages; page++) {
             if (shouldPause()) return { collectedCount: cityEmails.size, pageIndex: page, paused: true };
             onProgress(cityEmails.size, page);
             setStatus("Scrolling Google Search · " + city + " · result batch " + (page + 1) + "/" + maxPages);
