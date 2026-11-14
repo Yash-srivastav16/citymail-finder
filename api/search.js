@@ -43,8 +43,15 @@ function retryAfterMs(value) {
   return Number.isNaN(date) ? null : Math.max(0, date - Date.now());
 }
 
-async function searchProvider(query, city = "") {
+async function searchProvider(query, city = "", maxResults = 10) {
   const providers = [];
+  if (process.env.SEARXNG_URL) providers.push({ name: "SearXNG", run: async () => {
+    const u = new URL("/search", process.env.SEARXNG_URL); u.searchParams.set("q", query); u.searchParams.set("format", "json");
+    const raw = await fetch(u, { headers: { Accept: "application/json", "User-Agent": UA }, signal: AbortSignal.timeout(12000) });
+    if (!raw.ok) throw new Error("SearXNG HTTP " + raw.status);
+    const body = await raw.json();
+    return (body.results || []).slice(0, maxResults).map(x => ({ url: x.url || "", title: x.title || "", description: x.content || "" }));
+  }});
   if (process.env.FREESEA_API_KEY) providers.push({ name: "Freesea", run: async () => {
     let lastError;
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -57,7 +64,7 @@ async function searchProvider(query, city = "") {
       if (raw.ok) {
         const body = await raw.json();
         console.info("[citymail] provider_response", JSON.stringify({ provider: "Freesea", city, status: raw.status, attempt: attempt + 1, durationMs: Date.now() - startedAt }));
-        return (body.results || []).filter(x => x && x.type !== "sponsored").slice(0, 10).map(x => ({ url: x.url || x.link || "", title: x.title || "", description: x.snippet || x.description || x.content || "" }));
+        return (body.results || []).filter(x => x && x.type !== "sponsored").slice(0, maxResults).map(x => ({ url: x.url || x.link || "", title: x.title || "", description: x.snippet || x.description || x.content || "" }));
       }
       const responseText = (await raw.text()).slice(0, 800);
       const retryHeader = raw.headers.get("retry-after");
@@ -69,18 +76,11 @@ async function searchProvider(query, city = "") {
     }
     throw lastError || new Error("Freesea request failed");
   }});
-  if (process.env.SEARXNG_URL) providers.push({ name: "SearXNG", run: async () => {
-    const u = new URL("/search", process.env.SEARXNG_URL); u.searchParams.set("q", query); u.searchParams.set("format", "json");
-    const raw = await fetch(u, { headers: { Accept: "application/json", "User-Agent": UA }, signal: AbortSignal.timeout(12000) });
-    if (!raw.ok) throw new Error("SearXNG HTTP " + raw.status);
-    const body = await raw.json();
-    return (body.results || []).slice(0, 10).map(x => ({ url: x.url || "", title: x.title || "", description: x.content || "" }));
-  }});
   if (process.env.TAVILY_API_KEY) providers.push({ name: "Tavily", run: async () => {
-    const raw = await fetch("https://api.tavily.com/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ api_key: process.env.TAVILY_API_KEY, query, search_depth: "basic", max_results: 10 }), signal: AbortSignal.timeout(12000) });
+    const raw = await fetch("https://api.tavily.com/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ api_key: process.env.TAVILY_API_KEY, query, search_depth: "basic", max_results: maxResults }), signal: AbortSignal.timeout(12000) });
     if (!raw.ok) throw new Error("Tavily HTTP " + raw.status);
     const body = await raw.json();
-    return (body.results || []).slice(0, 10).map(x => ({ url: x.url || "", title: x.title || "", description: x.content || "" }));
+    return (body.results || []).slice(0, maxResults).map(x => ({ url: x.url || "", title: x.title || "", description: x.content || "" }));
   }});
   if (!providers.length) throw new Error("Configure FREESEA_API_KEY, SEARXNG_URL or TAVILY_API_KEY in Vercel environment variables.");
   const failures = [];
@@ -106,12 +106,12 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
   const token = process.env.CITYMAIL_ACCESS_TOKEN;
   if (token && req.headers["x-citymail-token"] !== token) return res.status(401).json({ error: "Unauthorized" });
-  const { city, query, template = "default" } = req.body || {};
-  if (typeof city !== "string" || !city.trim() || typeof query !== "string" || query.length > 400 || !query.trim()) return res.status(400).json({ error: "Provide a city and a search query (maximum 400 characters)." });
+  const { city, query, template = "default", maxResults = 10 } = req.body || {};
+  if (typeof city !== "string" || !city.trim() || typeof query !== "string" || query.length > 400 || !query.trim() || !Number.isInteger(maxResults) || maxResults < 1 || maxResults > 10) return res.status(400).json({ error: "Provide a city, a search query (maximum 400 characters), and maxResults between 1 and 10." });
   try {
     const found = new Map();
     console.info("[citymail] search_started", JSON.stringify({ city, template, provider: process.env.FREESEA_API_KEY ? "Freesea" : process.env.SEARXNG_URL ? "SearXNG" : process.env.TAVILY_API_KEY ? "Tavily" : "none" }));
-    const searched = await searchProvider(query.trim(), city);
+    const searched = await searchProvider(query.trim(), city, maxResults);
     const items = searched.items;
     for (const item of items) {
       const u = await safeUrl(item.url);

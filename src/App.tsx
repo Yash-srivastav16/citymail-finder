@@ -1,9 +1,186 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as XLSX from "xlsx";
+import {
+  createBatchJobs,
+  createCheckpoint,
+  getBatchProgress,
+  getNextRunnableJobIndex,
+  parseCheckpoint,
+  type BatchJob,
+} from "./batch/queue";
+import { runLocationBatch } from "./batch/runner";
 
 type Result = { city: string; email: string; sourceUrl: string; domain: string; sourceType: string; createdAt: string };
 const DB = "citymail-finder";
+const CHECKPOINT_KEY = "cm-batch-checkpoint-v1";
+const LEGACY_CHECKPOINT_KEY = "cm-search-checkpoint-v1";
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+function waitForTab(tabId: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => { chrome.tabs.onUpdated.removeListener(listener); reject(new Error("Google page load timed out")); }, 30000);
+    const listener = (updatedId: number, info: { status?: string }) => {
+      if (updatedId === tabId && info.status === "complete") {
+        window.clearTimeout(timer); chrome.tabs.onUpdated.removeListener(listener); resolve();
+      }
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.get(tabId).then(tab => {
+      if (tab.status === "complete") {
+        window.clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve();
+      }
+    }).catch(error => {
+      window.clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(listener);
+      reject(error);
+    });
+  });
+}
+function navigateTab(tabId: number, url: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      reject(new Error("Google next-results page load timed out"));
+    }, 30000);
+    const listener = (updatedId: number, info: { status?: string }) => {
+      if (updatedId === tabId && info.status === "complete") {
+        window.clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve();
+      }
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.update(tabId, { url }).catch(error => {
+      window.clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(listener);
+      reject(error);
+    });
+  });
+}
+async function extractVisibleEmails(tabId: number) {
+  const [injected] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      const text = document.body?.innerText || "";
+      const captcha = /unusual traffic|automated queries|not a robot|our systems have detected|sorry\/.*computer network/i.test(text);
+      const emails = [...new Set((text.match(/[A-Z0-9.!#$%&'*+/=?^`_{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/gi) || []).map(x => x.toLowerCase()))];
+      return { captcha, emails, title: document.title, url: location.href };
+    }
+  });
+  return injected.result as { captcha: boolean; emails: string[]; title: string; url: string };
+}
+
+async function appendNextGoogleResults(tabId: number, pageNumber: number) {
+  const [injected] = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    args: [pageNumber],
+    func: async (page: number) => {
+      const bodyText = document.body?.innerText || "";
+      const captchaPattern = /unusual traffic|automated queries|not a robot|our systems have detected|computer network/i;
+      if (captchaPattern.test(bodyText)) return { captcha: true, appended: 0, url: location.href, reason: "Google verification required" };
+
+      const current = new URL(location.href);
+      const next = new URL(current.href);
+      // `page` is one-based for the appended result batch (batch 2 = start 10).
+      next.searchParams.set("start", String(Math.max(0, page - 1) * 10));
+      next.searchParams.set("num", "10");
+      next.searchParams.set("filter", "0");
+
+      let response: Response;
+      try {
+        response = await fetch(next.href, { credentials: "include", redirect: "follow" });
+      } catch {
+        return { captcha: false, appended: 0, url: location.href, reason: "Could not load the next Google result set in the current tab" };
+      }
+      const html = await response.text();
+      const parsed = new DOMParser().parseFromString(html, "text/html");
+      const parsedText = parsed.body?.innerText || "";
+      if (captchaPattern.test(parsedText) || response.url.includes("/sorry/") || response.url.includes("consent.google")) {
+        return { captcha: true, appended: 0, url: location.href, reason: "Google returned a verification or consent page" };
+      }
+
+      const sourceRoot = parsed.querySelector("#rso") || parsed.querySelector("#search");
+      const targetRoot = document.querySelector("#rso") || document.querySelector("#search");
+      if (!sourceRoot || !targetRoot) {
+        return { captcha: false, appended: 0, url: location.href, reason: "Google result container was not found" };
+      }
+
+      const cardSelector = ".MjjYud, .g";
+      let cards = Array.from(sourceRoot.querySelectorAll<HTMLElement>(cardSelector))
+        .filter(card => !!card.querySelector("a[href] h3"));
+      cards = cards.filter(card => !card.parentElement?.closest(cardSelector));
+      if (!cards.length) {
+        cards = Array.from(sourceRoot.children).filter((node): node is HTMLElement =>
+          node instanceof HTMLElement && !!node.querySelector("a[href] h3")
+        );
+      }
+
+      const existing = new Set(Array.from(targetRoot.querySelectorAll<HTMLAnchorElement>("a[href] h3"))
+        .map(heading => heading.closest("a")?.href || "")
+        .filter(Boolean));
+      const seen = new Set(existing);
+      const fresh = cards.filter(card => {
+        const link = card.querySelector<HTMLAnchorElement>("a[href] h3")?.closest("a");
+        if (!link?.href || seen.has(link.href)) return false;
+        seen.add(link.href);
+        return true;
+      });
+      if (!fresh.length) {
+        return { captcha: false, appended: 0, url: location.href, reason: "No new Google result cards were found" };
+      }
+
+      const marker = document.createElement("div");
+      marker.setAttribute("data-citymail-page-marker", String(page));
+      marker.textContent = "More Google results · batch " + page;
+      marker.style.cssText = "margin:24px 0 12px;padding:10px 0;border-top:1px solid #dadce0;color:#5f6368;font-size:13px;font-weight:600";
+      targetRoot.appendChild(marker);
+
+      fresh.forEach((card, index) => {
+        const clone = document.importNode(card, true) as HTMLElement;
+        clone.setAttribute("data-citymail-appended", String(page));
+        targetRoot.appendChild(clone);
+      });
+      return { captcha: false, appended: fresh.length, url: location.href, reason: "" };
+    }
+  });
+  return injected.result as { captcha: boolean; appended: number; url: string; reason: string };
+}
+async function scrollGoogleResults(tabId: number) {
+  const [injected] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: async () => {
+      const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+      const startHeight = document.documentElement.scrollHeight;
+      let scrolls = 0;
+      // Move through the currently loaded result cards visibly. Loading more
+      // result batches is handled separately by the same-page SERP stitcher.
+      for (let i = 0; i < 8; i++) {
+        const before = window.scrollY;
+        window.scrollBy({ top: Math.max(500, Math.floor(window.innerHeight * 0.8)), behavior: "smooth" });
+        await pause(350);
+        scrolls++;
+        if (window.scrollY === before || window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 4) break;
+      }
+      const bodyText = document.body?.innerText || "";
+      const captcha = /unusual traffic|automated queries|not a robot|our systems have detected|computer network/i.test(bodyText);
+      const emails = [...new Set((bodyText.match(/[A-Z0-9.!#$%&'*+/=?^`_{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/gi) || []).map(x => x.toLowerCase()))];
+      return {
+        captcha, emails, title: document.title, url: location.href,
+        nextUrl: null,
+        scrollLimitReached: false,
+        scrolls,
+        grewDuringScroll: document.documentElement.scrollHeight > startHeight
+      };
+    }
+  });
+  return injected.result as {
+    captcha: boolean; emails: string[]; title: string; url: string;
+    nextUrl: string | null; scrollLimitReached: boolean; scrolls: number; grewDuringScroll: boolean;
+  };
+}
 function dbOpen(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const r = indexedDB.open(DB, 1);
@@ -42,51 +219,80 @@ async function readRows(): Promise<Result[]> {
     r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error);
   });
 }
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-function waitForTab(tabId: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = window.setTimeout(() => { chrome.tabs.onUpdated.removeListener(listener); reject(new Error("Google page load timed out")); }, 30000);
-    const listener = (updatedId: number, info: { status?: string }) => {
-      if (updatedId === tabId && info.status === "complete") {
-        window.clearTimeout(timer); chrome.tabs.onUpdated.removeListener(listener); resolve();
-      }
-    };
-    chrome.tabs.onUpdated.addListener(listener);
-    chrome.tabs.get(tabId).then(tab => {
-      if (tab.status === "complete") {
-        window.clearTimeout(timer);
-        chrome.tabs.onUpdated.removeListener(listener);
-        resolve();
-      }
-    }).catch(error => {
-      window.clearTimeout(timer);
-      chrome.tabs.onUpdated.removeListener(listener);
-      reject(error);
-    });
-  });
+
+function sameLocations(jobs: BatchJob[], locations: string[]) {
+  return jobs.length === locations.length &&
+    jobs.every((job, index) => job.location.trim().toLocaleLowerCase() === locations[index].trim().toLocaleLowerCase());
 }
-async function extractVisibleEmails(tabId: number) {
-  const [injected] = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: () => {
-      const text = document.body?.innerText || "";
-      const captcha = /unusual traffic|automated queries|not a robot|our systems have detected|sorry\/.*computer network/i.test(text);
-      const emails = [...new Set((text.match(/[A-Z0-9.!#$%&'*+/=?^`_{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/gi) || []).map(x => x.toLowerCase()))];
-      return { captcha, emails, title: document.title, url: location.href };
-    }
-  });
-  return injected.result as { captcha: boolean; emails: string[]; title: string; url: string };
-}
+
 export default function App() {
   const [cities, setCities] = useState<string[]>(JSON.parse(localStorage.getItem("cm-cities") || "[]"));
   const [cityInput, setCityInput] = useState("");
-  const [query, setQuery] = useState(localStorage.getItem("cm-query-v1") || '"\u007bcity\u007d" business email contact');
-  const [pages, setPages] = useState(Number(localStorage.getItem("cm-pages-v2") || 10));
+  const [query, setQuery] = useState(localStorage.getItem("cm-query-v1") || '"{city}" business email contact');
+  const [pages, setPages] = useState(Math.min(50, Math.max(1, Number(localStorage.getItem("cm-pages-v2") || 10))));
   const [results, setResults] = useState<Result[]>([]);
   const [status, setStatus] = useState("Ready");
   const [busy, setBusy] = useState(false);
-  useEffect(() => { readRows().then(setResults).catch(e => setStatus(e.message)); }, []);
-  useEffect(() => { localStorage.setItem("cm-cities", JSON.stringify(cities)); localStorage.setItem("cm-pages-v2", String(pages)); localStorage.setItem("cm-query-v1", query); }, [cities, pages, query]);
+  const [batchJobs, setBatchJobs] = useState<BatchJob[]>([]);
+  const [activeJobIndex, setActiveJobIndex] = useState(0);
+  const pauseRequested = useRef(false);
+
+  useEffect(() => {
+    readRows().then(setResults).catch(e => setStatus(e.message));
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem("cm-cities", JSON.stringify(cities));
+    localStorage.setItem("cm-query-v1", query);
+    localStorage.setItem("cm-pages-v2", String(pages));
+
+    const checkpoint = parseCheckpoint(localStorage.getItem(CHECKPOINT_KEY));
+    if (checkpoint && cities.length) {
+      const previousByLocation = new Map(
+        checkpoint.jobs.map(job => [job.location.trim().toLocaleLowerCase(), job])
+      );
+      const mergedJobs = createBatchJobs(cities).map(job => {
+        const previous = previousByLocation.get(job.location.toLocaleLowerCase());
+        return previous ? { ...previous, id: job.id, location: job.location } : job;
+      });
+      const nextRunnable = getNextRunnableJobIndex(mergedJobs, 0);
+      const nextActiveIndex = nextRunnable >= 0 ? nextRunnable : Math.max(0, mergedJobs.length - 1);
+      setBatchJobs(mergedJobs);
+      setActiveJobIndex(nextActiveIndex);
+      localStorage.setItem(CHECKPOINT_KEY, JSON.stringify(createCheckpoint(mergedJobs, nextActiveIndex)));
+      return;
+    }
+
+    // Migrate the older city/page checkpoint. The API collector performs one
+    // search request per location, so the current location restarts once.
+    const legacyValue = localStorage.getItem(LEGACY_CHECKPOINT_KEY);
+    if (legacyValue && cities.length) {
+      try {
+        const legacy = JSON.parse(legacyValue) as { cityIndex?: number };
+        if (Number.isInteger(legacy.cityIndex) &&
+          (legacy.cityIndex as number) >= 0 && (legacy.cityIndex as number) < cities.length) {
+          const migrated = createBatchJobs(cities).map((job, index) => ({
+            ...job,
+            status: index < (legacy.cityIndex as number) ? "completed" as const :
+              index === legacy.cityIndex ? "paused" as const : "pending" as const,
+            pageIndex: 0,
+          }));
+          const migratedIndex = legacy.cityIndex as number;
+          setBatchJobs(migrated);
+          setActiveJobIndex(migratedIndex);
+          localStorage.setItem(CHECKPOINT_KEY, JSON.stringify(createCheckpoint(migrated, migratedIndex)));
+          localStorage.removeItem(LEGACY_CHECKPOINT_KEY);
+          return;
+        }
+      } catch {
+        localStorage.removeItem(LEGACY_CHECKPOINT_KEY);
+      }
+    }
+
+    setBatchJobs([]);
+    setActiveJobIndex(0);
+    if (localStorage.getItem(CHECKPOINT_KEY)) localStorage.removeItem(CHECKPOINT_KEY);
+  }, [cities, pages, query]);
 
   async function importCities(file?: File) {
     if (!file) return;
@@ -97,138 +303,304 @@ export default function App() {
       if (!header) throw new Error('Excel must contain a column named "City".');
       const imported = rows.map(row => String(row[header] || "").trim()).filter(Boolean);
       setCities(old => [...new Set([...old, ...imported])]);
-      setStatus("Imported " + imported.length + " city rows.");
-    } catch (e) { setStatus("Excel import failed: " + (e as Error).message); }
+      setStatus("Imported " + imported.length + " location rows.");
+    } catch (e) {
+      setStatus("Excel import failed: " + (e as Error).message);
+    }
   }
+
   function addCities() {
     const next = cityInput.split(/[\n,;]+/).map(x => x.trim()).filter(Boolean);
-    setCities(old => [...new Set([...old, ...next])]); setCityInput("");
+    setCities(old => [...new Set([...old, ...next])]);
+    setCityInput("");
   }
+
   function removeCity(city: string) {
     setCities(old => old.filter(item => item !== city));
-    localStorage.removeItem("cm-search-checkpoint-v1");
-    setStatus("Removed city: " + city + ". Search progress was reset; start again when ready.");
+    setBatchJobs([]);
+    setActiveJobIndex(0);
+    localStorage.removeItem(CHECKPOINT_KEY);
+    localStorage.removeItem(LEGACY_CHECKPOINT_KEY);
+    setStatus("Removed location: " + city + ". Batch progress was reset; start again when ready.");
   }
+
   function clearCities() {
-    if (!window.confirm("Remove all saved cities? Collected emails will be kept.")) return;
+    if (!window.confirm("Remove all saved locations? Collected emails will be kept.")) return;
     setCities([]);
-    localStorage.removeItem("cm-search-checkpoint-v1");
-    setStatus("All cities removed. Collected emails are still saved.");
+    setBatchJobs([]);
+    setActiveJobIndex(0);
+    localStorage.removeItem(CHECKPOINT_KEY);
+    localStorage.removeItem(LEGACY_CHECKPOINT_KEY);
+    setStatus("All locations removed. Collected emails are still saved.");
   }
+
   async function removeEmail(email: string) {
     await deleteRow(email);
     setResults(await readRows());
     setStatus("Removed " + email);
   }
+
   async function clearEmails() {
     if (!window.confirm("Delete all collected email addresses? This cannot be undone.")) return;
     await clearRows();
     setResults([]);
+    setBatchJobs(old => old.map(job => ({ ...job, collectedCount: 0 })));
     setStatus("All collected emails deleted.");
   }
+
   async function clearAllData() {
-    if (!window.confirm("Delete all saved cities, collected emails, and search progress? This cannot be undone.")) return;
+    if (!window.confirm("Delete all saved locations, collected emails, and search progress? This cannot be undone.")) return;
     await clearRows();
     setResults([]);
     setCities([]);
     setCityInput("");
-    setQuery('"\u007bcity\u007d" business email contact');
+    setQuery('"{city}" business email contact');
     setPages(10);
-    localStorage.removeItem("cm-search-checkpoint-v1");
-    setStatus("All saved cities, emails, search settings, and search progress have been cleared.");
+    setBatchJobs([]);
+    setActiveJobIndex(0);
+    localStorage.removeItem(CHECKPOINT_KEY);
+    localStorage.removeItem(LEGACY_CHECKPOINT_KEY);
+    setStatus("All saved locations, emails, search settings, and batch progress have been cleared.");
   }
+
   async function run() {
-    if (!cities.length) { setStatus("Import or add at least one city."); return; }
-    if (!chrome?.tabs || !chrome?.scripting) { setStatus("Open this tool from the installed Chrome extension."); return; }
+    // Chrome extension APIs are only available in the installed extension context,
+    // not when this React UI is opened as a normal Vercel website.
+    if (typeof chrome === "undefined" || !chrome.tabs?.create || !chrome.scripting?.executeScript) {
+      setStatus("Google Search collection needs the installed Chrome extension. Build the extension, load the dist folder at chrome://extensions, then open CityMail Finder from Chrome. This website preview is for checking the UI only.");
+      return;
+    }
+    if (!cities.length) {
+      setStatus("Import or add at least one location.");
+      return;
+    }
+
+    const baseJobs = batchJobs.length && sameLocations(batchJobs, cities)
+      ? batchJobs.map(job => job.status === "failed" ? { ...job, status: "pending" as const, error: undefined } : { ...job })
+      : createBatchJobs(cities);
+    const hasRunnable = baseJobs.some(job => job.status === "pending" || job.status === "paused");
+    const jobs = hasRunnable ? baseJobs : createBatchJobs(cities);
+    // Start at the earliest runnable item so failed locations are retried too.
+    const nextIndex = getNextRunnableJobIndex(jobs, 0);
+    const startIndex = nextIndex >= 0 ? nextIndex : 0;
+
+    pauseRequested.current = false;
     setBusy(true);
-    let tabId: number | undefined;
-    let total = 0;
-    let keepTabOpen = false;
-    const checkpointKey = "cm-search-checkpoint-v1";
-    const saved = JSON.parse(localStorage.getItem(checkpointKey) || "null") as { cityIndex: number; pageIndex: number } | null;
-    const startCityIndex = saved?.cityIndex ?? 0;
-    const startPageIndex = saved?.pageIndex ?? 0;
+    setBatchJobs(jobs);
+    let pauseReason = "";
+    let googleTabId: number | undefined;
+    let keepGoogleTabOpen = false;
+
     try {
-      for (let cityIndex = startCityIndex; cityIndex < cities.length; cityIndex++) {
-        const city = cities[cityIndex];
-        const firstPage = cityIndex === startCityIndex ? startPageIndex : 0;
-        const search = query.replaceAll("{city}", city).trim();
-        for (let page = firstPage; page < Math.min(50, Math.max(1, pages)); page++) {
-          // Save the exact page before opening it. If Google interrupts the run,
-          // the next Start click retries this page instead of restarting the batch.
-          localStorage.setItem(checkpointKey, JSON.stringify({ cityIndex, pageIndex: page }));
-          const url = "https://www.google.com/search?q=" + encodeURIComponent(search) + "&num=10&filter=0&start=" + (page * 10);
-          setStatus("Opening Google · " + city + " · page " + (page + 1) + "/" + pages);
-          if (tabId === undefined) {
-            const tab = await chrome.tabs.create({ url, active: false });
-            if (tab.id === undefined) throw new Error("Could not open Google tab.");
-            tabId = tab.id;
-            if (tab.status !== "complete") await waitForTab(tabId);
+      const completedJobs = await runLocationBatch({
+        jobs,
+        startIndex,
+        shouldPause: () => pauseRequested.current,
+        onJobsChange: (nextJobs, index) => {
+          setBatchJobs(nextJobs.map(job => ({ ...job })));
+          setActiveJobIndex(index);
+        },
+        onCheckpoint: value => localStorage.setItem(CHECKPOINT_KEY, value),
+        collectLocation: async (city, startPageIndex, onProgress, shouldPause) => {
+          const cityEmails = new Set((await readRows()).filter(row => row.city.toLowerCase() === city.toLowerCase()).map(row => row.email.toLowerCase()));
+          const maxPages = Math.min(50, Math.max(1, pages));
+          const searchUrl = "https://www.google.com/search?q=" + encodeURIComponent(query.replaceAll("{city}", city).trim()) + "&num=10&filter=0&start=" + (Math.max(0, startPageIndex) * 10);
+          if (googleTabId === undefined) {
+            const tab = await chrome.tabs.create({ url: searchUrl, active: true });
+            if (typeof tab.id !== "number") throw new Error("Could not open Google Search tab.");
+            googleTabId = tab.id;
+            if (tab.status !== "complete") await waitForTab(googleTabId);
           } else {
-            const loaded = waitForTab(tabId);
-            await chrome.tabs.update(tabId, { url });
-            await loaded;
+            // Reuse the same visible Google tab for the next spreadsheet
+            // location, but keep each location's result batches on one URL.
+            await navigateTab(googleTabId, searchUrl);
+            await chrome.tabs.update(googleTabId, { active: true });
           }
-          await sleep(1500 + Math.floor(Math.random() * 1000));
-          let pageData = await extractVisibleEmails(tabId);
-          if (pageData.captcha) {
-            keepTabOpen = true;
-            await chrome.tabs.update(tabId, { active: true });
-            setStatus("CAPTCHA at " + city + ", page " + (page + 1) + ". Solve it in the Google tab; searching will resume automatically (up to 5 minutes).");
-            const deadline = Date.now() + 5 * 60 * 1000;
-            while (Date.now() < deadline) {
-              await sleep(1500);
-              try {
-                pageData = await extractVisibleEmails(tabId);
-                if (!pageData.captcha) {
-                  keepTabOpen = false;
-                  setStatus("Verification cleared. Resuming " + city + " · page " + (page + 1) + "/" + pages);
-                  break;
-                }
-              } catch {
-                // Google may be navigating between the challenge and results page.
+
+          let completedBatches = Math.max(0, startPageIndex);
+          for (let page = Math.max(0, startPageIndex); page < maxPages; page++) {
+            if (shouldPause()) return { collectedCount: cityEmails.size, pageIndex: page, paused: true };
+            onProgress(cityEmails.size, page);
+            setStatus("Collecting Google results · " + city + " · batch " + (page + 1) + "/" + maxPages);
+            await sleep(900);
+            let pageData = await scrollGoogleResults(googleTabId);
+            if (pageData.captcha) {
+              keepGoogleTabOpen = true;
+              await chrome.tabs.update(googleTabId, { active: true });
+              setStatus("Google verification required. Solve it manually in the open tab; collection will wait up to 5 minutes.");
+              const deadline = Date.now() + 5 * 60 * 1000;
+              while (Date.now() < deadline) {
+                await sleep(1500);
+                try { pageData = await scrollGoogleResults(googleTabId); if (!pageData.captcha) { keepGoogleTabOpen = false; break; } } catch { /* page is navigating */ }
+              }
+              if (pageData.captcha) {
+                pauseReason = "Google verification remains unresolved. Solve it in the open tab, then select Start / Resume.";
+                return { collectedCount: cityEmails.size, pageIndex: page, paused: true };
               }
             }
-            if (pageData.captcha) {
-              setStatus("Google verification is still showing at " + city + ", page " + (page + 1) + ". Solve it in the open Google tab, then click Start / Resume. The batch will continue from this page.");
-              return;
+
+            const timestamp = new Date().toISOString();
+            const rows: Result[] = pageData.emails.filter(email => !cityEmails.has(email.toLowerCase())).map(email => ({
+              city, email: email.toLowerCase(), sourceUrl: pageData.url, domain: "google.com",
+              sourceType: "google-visible-result", createdAt: timestamp,
+            }));
+            if (rows.length) { await saveRows(rows); rows.forEach(row => cityEmails.add(row.email)); setResults(await readRows()); }
+            completedBatches = page + 1;
+            onProgress(cityEmails.size, page + 1);
+            setStatus(city + " · result batch " + (page + 1) + "/" + maxPages + " · " + pageData.scrolls + " scrolls · " + cityEmails.size + " unique matches");
+
+            if (shouldPause()) return { collectedCount: cityEmails.size, pageIndex: page + 1, paused: true };
+            if (page + 1 >= maxPages) break;
+
+            // Infy-style AutoPager: request the next Google result set from the
+            // current page session and append its result cards into the existing
+            // #rso container. The visible tab URL never changes and Next is
+            // never clicked or followed through tab navigation.
+            // Small courtesy delay between Google requests; this does not bypass
+            // verification or any Google access controls.
+            await sleep(2500);
+            const appended = await appendNextGoogleResults(googleTabId, page + 2);
+            if (appended.captcha) {
+              keepGoogleTabOpen = true;
+              await chrome.tabs.update(googleTabId, { active: true });
+              pauseReason = "Google verification is required before more results can load. Solve it manually in the open tab, then select Start / Resume.";
+              return { collectedCount: cityEmails.size, pageIndex: page + 1, paused: true };
             }
+            if (!appended.appended) {
+              setStatus(city + " · stopped after " + (page + 1) + " result batches · " + appended.reason);
+              break;
+            }
+            setStatus(city + " · appended " + appended.appended + " more result cards in the same Google page.");
           }
-          const rows: Result[] = pageData.emails.map(email => ({ city, email, sourceUrl: pageData.url, domain: "google.com", sourceType: "google-visible-result", createdAt: new Date().toISOString() }));
-          if (rows.length) {
-            await saveRows(rows); total += rows.length; setResults(await readRows());
-          }
-          // Mark the next page as the resume point only after this page is processed.
-          localStorage.setItem(checkpointKey, JSON.stringify({ cityIndex, pageIndex: page + 1 }));
-          if (page > 0 && pageData.emails.length === 0 && /did not match any documents|no results found/i.test(pageData.title)) break;
-        }
+          return { collectedCount: cityEmails.size, pageIndex: completedBatches };
+        },
+      });
+
+      setBatchJobs(completedJobs);
+      const progress = getBatchProgress(completedJobs);
+      const hasPaused = completedJobs.some(job => job.status === "paused");
+      const failed = completedJobs.filter(job => job.status === "failed");
+      if (hasPaused) {
+        setStatus(pauseReason || ("Batch paused. " + progress.completed + "/" + progress.total + " locations completed. Resume to continue."));
+      } else if (failed.length) {
+        setStatus("Batch finished with " + failed.length + " failed location(s). " + progress.completed + "/" + progress.total + " completed; select Start / Resume to retry failed locations.");
+      } else {
+        localStorage.removeItem(CHECKPOINT_KEY);
+        setStatus("All locations completed. " + progress.collected + " city-level email matches collected; duplicate email addresses are deduplicated in storage.");
       }
-      localStorage.removeItem(checkpointKey);
-      setStatus("Finished. Found " + total + " email matches; duplicates are removed.");
     } catch (e) {
-      setStatus("Stopped: " + (e as Error).message);
+      setStatus("Batch stopped: " + (e as Error).message);
     } finally {
-      if (tabId !== undefined) {
-        const tabs = await chrome.tabs.get(tabId).catch(() => null);
-        if (tabs && !keepTabOpen && !/sorry|unusual traffic|captcha/i.test(tabs.url || "")) await chrome.tabs.remove(tabId).catch(() => undefined);
-      }
+      if (googleTabId !== undefined && !keepGoogleTabOpen) await chrome.tabs.remove(googleTabId).catch(() => undefined);
       setBusy(false);
     }
   }
+
+  function pause() {
+    pauseRequested.current = true;
+    setStatus("Pause requested. The current location search will finish before the batch pauses.");
+  }
+
   function exportExcel() {
     const emails = [...new Set(results.map(r => r.email.toLowerCase()))];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([["Email"], ...emails.map(email => [email])]), "Emails");
     XLSX.writeFile(wb, "citymail-emails.xlsx");
   }
+
+  const progress = getBatchProgress(batchJobs);
+  const activeJob = batchJobs[activeJobIndex];
+
   return <main className="app">
-    <header><h1>CityMail Finder</h1><p>Automatically collect email addresses visible in Google search results</p></header>
-    <section><h2>Import cities</h2><label>Upload .xlsx or .csv (column name: City)<input type="file" accept=".xlsx,.xls,.csv" onChange={e => importCities(e.target.files?.[0])}/></label></section>
-    <section><h2>Cities</h2><textarea value={cityInput} onChange={e => setCityInput(e.target.value)} placeholder="Add cities, one per line or comma separated"/><button onClick={addCities}>Add cities</button><button className="secondary" disabled={!cities.length || busy} onClick={clearCities}>Remove all cities</button><p>{cities.length} cities loaded</p><ul className="managed-list">{cities.map(city => <li key={city}><span>{city}</span><button className="danger small" disabled={busy} onClick={() => removeCity(city)}>Remove</button></li>)}</ul></section>
-    <section><h2>Google search settings</h2><label>Search query (use {"{city}"} where city name should appear)<input value={query} onChange={e => setQuery(e.target.value)}/></label><label>Pages per city (1–50)<input type="number" min="1" max="50" value={pages} onChange={e => setPages(Math.min(50, Math.max(1, Number(e.target.value) || 1)))}/></label><p>Searches run page by page with a delay. Only email-shaped text visible on Google result pages is collected; business websites are not crawled.</p><p><strong>Manual verification required:</strong> CityMail Finder does not verify email ownership, validity, deliverability, or business association. Treat every match as unverified and independently confirm it before relying on it or contacting anyone.</p></section>
-    <section><h2>Run</h2><p><strong>Manual CAPTCHA handling:</strong> If Google displays a CAPTCHA or verification challenge, you must solve it yourself in the opened Google tab. CityMail Finder does not solve, bypass, or automate verification. If the challenge remains, use Start / Resume after completing it manually.</p><button disabled={busy || !cities.length} onClick={run}>{busy ? "Searching Google…" : "Start / Resume search"}</button><button disabled={busy || !results.length} onClick={exportExcel}>Export emails only</button><p role="status">{status}</p><p>{new Set(results.map(r => r.email.toLowerCase())).size} unique email addresses saved locally</p></section>
-    <section><h2>Collected emails</h2><button className="danger" disabled={busy || !results.length} onClick={clearEmails}>Delete all emails</button><div className="table"><table><thead><tr><th>Email</th><th>Action</th></tr></thead><tbody>{[...new Set(results.map(r => r.email.toLowerCase()))].map(email => <tr key={email}><td>{email}</td><td><button className="danger small" disabled={busy} onClick={() => removeEmail(email)}>Remove</button></td></tr>)}</tbody></table></div></section>
-    <section><h2>Storage management</h2><p>Remove all saved cities, collected emails, and the saved search checkpoint from this browser.</p><button className="danger" disabled={busy} onClick={clearAllData}>Clear all saved data</button></section>
-    <footer>Uses Google search results in your browser. Google may limit automated requests or show verification. CAPTCHA challenges require your manual action; the extension never solves or bypasses them. All collected email matches are unverified and require independent manual verification.</footer>
+    <header>
+      <h1>CityMail Finder</h1>
+      <p>Automatically search multiple locations and collect email matches, one location at a time</p>
+    </header>
+
+    <section>
+      <h2>Import locations</h2>
+      <label>Upload .xlsx or .csv (column name: City)
+        <input type="file" accept=".xlsx,.xls,.csv" onChange={e => importCities(e.target.files?.[0])}/>
+      </label>
+    </section>
+
+    <section>
+      <h2>Locations</h2>
+      <textarea value={cityInput} onChange={e => setCityInput(e.target.value)} placeholder="Add locations, one per line or comma separated"/>
+      <button onClick={addCities}>Add locations</button>
+      <button className="secondary" disabled={!cities.length || busy} onClick={clearCities}>Remove all locations</button>
+      <p>{cities.length} locations loaded</p>
+      <ul className="managed-list">
+        {cities.map(city => <li key={city}><span>{city}</span><button className="danger small" disabled={busy} onClick={() => removeCity(city)}>Remove</button></li>)}
+      </ul>
+    </section>
+
+    <section>
+      <h2>Search settings</h2>
+      <label>Search query (use {"{city}"} where the location name should appear)
+        <input value={query} onChange={e => setQuery(e.target.value)}/>
+      </label>
+      <label>Google Search pages per location (1–50)
+        <input type="number" min="1" max="50" value={pages} onChange={e => setPages(Math.min(50, Math.max(1, Number(e.target.value) || 1)))}/>
+      </label>
+      <p>The extension keeps one Google Search URL open and stitches additional Google result batches into the same results list, like a SERP auto-pager. It does not click Next, reload the search page, or navigate between result pages. Each batch is fetched using your current Google browser session; verification challenges require manual handling.</p>
+      <p><strong>Search method:</strong> Chrome tab automation using Google Search pages. No search API key or external provider is configured.</p>
+      <p><strong>Important:</strong> Email-shaped matches from search-result snippets are unverified. This version does not crawl linked business websites or verify ownership, validity, deliverability, or business association. Independently confirm each address before relying on it or contacting anyone.</p>
+    </section>
+
+    <section>
+      <h2>Run batch</h2>
+      <button disabled={busy || !cities.length} onClick={run}>{busy ? "Searching locations…" : "Start / Resume batch"}</button>
+      <button className="secondary" disabled={!busy} onClick={pause}>Pause after current location</button>
+      <button disabled={busy || !results.length} onClick={exportExcel}>Export emails only</button>
+      <p role="status">{status}</p>
+
+      {batchJobs.length > 0 && <div className="batch-progress">
+        <p><strong>{progress.percentage}% complete</strong> · {progress.completed}/{progress.total} locations completed · {progress.failed} failed · {progress.pending} pending/paused</p>
+        <div style={{ height: 10, borderRadius: 8, background: "#28364b", overflow: "hidden" }}>
+          <div style={{ width: progress.percentage + "%", height: "100%", background: "#4779d5", transition: "width .2s" }}/>
+        </div>
+        {activeJob && <p>Current / next location: <strong>{activeJob.location}</strong></p>}
+        <div className="table">
+          <table>
+            <thead><tr><th>Location</th><th>Status</th><th>Search</th><th>Email matches</th></tr></thead>
+            <tbody>
+              {batchJobs.map(job => <tr key={job.id}>
+                <td>{job.location}</td>
+                <td>{job.status}{job.error ? " — " + job.error : ""}</td>
+                <td>{job.pageIndex >= 1 ? "Done" : "Not started"}</td>
+                <td>{job.collectedCount}</td>
+              </tr>)}
+            </tbody>
+          </table>
+        </div>
+      </div>}
+      <p>{new Set(results.map(r => r.email.toLowerCase())).size} unique email addresses saved locally</p>
+    </section>
+
+    <section>
+      <h2>Collected emails</h2>
+      <button className="danger" disabled={busy || !results.length} onClick={clearEmails}>Delete all emails</button>
+      <div className="table">
+        <table>
+          <thead><tr><th>Email</th><th>Action</th></tr></thead>
+          <tbody>
+            {[...new Set(results.map(r => r.email.toLowerCase()))].map(email =>
+              <tr key={email}><td>{email}</td><td><button className="danger small" disabled={busy} onClick={() => removeEmail(email)}>Remove</button></td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <h2>Storage management</h2>
+      <p>Remove all saved locations, collected emails, and the saved batch checkpoint from this browser.</p>
+      <button className="danger" disabled={busy} onClick={clearAllData}>Clear all saved data</button>
+    </section>
+
+    <footer>
+      Google Search stays on one URL while additional result cards are appended into the current page. Verification challenges require manual handling. The extension does not bypass CAPTCHA or access controls. All collected email matches are unverified.
+    </footer>
   </main>;
 }

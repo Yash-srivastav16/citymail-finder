@@ -1,51 +1,31 @@
 # CityMail Finder — extension build and release checklist
 
-## Current product behaviour
+## Current behaviour
 
-CityMail Finder is a Manifest V3 Chrome extension. It accepts a city list (CSV/XLSX with a `City` column or manual entry), builds a configurable Google Search query for each city, opens result pages, extracts email-shaped strings from visible result-page text, deduplicates addresses in local IndexedDB, and exports unique addresses to an Excel workbook.
+Manifest V3 Chrome extension. Import locations from CSV/XLSX (`City` column) or enter them manually. It opens Google Search pages in Chrome, extracts email-shaped strings from visible result-page text, deduplicates them in IndexedDB, and exports unique addresses to Excel. Locations run sequentially; 1–50 pages per location (10 default) are navigated in a reused tab. Progress is checkpointed so a paused batch can resume.
 
-The extension does **not** crawl linked business websites, verify email ownership or deliverability, confirm that an address belongs to a particular business, send email, upload collected results to a CityMail Finder server, or solve/bypass CAPTCHA. Every extracted email-shaped string is an **unverified match**. Users must independently verify the address and its business association before relying on it or contacting anyone. If a Google CAPTCHA or other verification challenge appears, the user must complete it manually in the Google tab. The extension may resume after the challenge is cleared; if it remains paused, the user must click Start / Resume. The extension never automates, solves, bypasses, or circumvents a challenge.
+The extension uses browser tab automation, not Google Custom Search JSON API or third-party search APIs. It does not crawl linked sites, verify ownership/deliverability/business association, or send email. All matches are unverified.
 
-**Important:** this workflow automates Google Search queries and reads Google result pages. Google states that automated queries/scraping without express permission are not allowed. A Chrome Web Store review or listing is not permission from Google and does not establish compliance with Google's terms. Do not publish or distribute this workflow as Google-approved. Obtain express permission or replace the search source with a provider whose terms explicitly allow the intended automated access before commercial operation. Never try to evade rate limits, CAPTCHA, or other access controls.
+## Google Search access
 
-## Local development
+Google may display verification challenges or restrict automated queries. The extension requires manual user handling and does not solve CAPTCHA, bypass controls, or evade rate limits. Automated querying may be restricted by Google's terms; confirm permission before use.
 
-Requirements: a current Node.js LTS release and npm.
+## Build and load
 
-```bash
-npm install
-npm run build
-```
+1. `npm install`
+2. `npm run build`
+3. Open `chrome://extensions` and enable Developer mode.
+4. Choose Load unpacked and select `dist/`.
+5. Test import, sequential location/page processing, pause/resume, manual challenge handling, deduplication and Excel export.
 
-The production extension is generated in `dist/`.
+## Permissions
 
-## Load unpacked in Chrome
+- `tabs`: create, reuse, activate and close the Google Search tab.
+- `scripting`: inspect visible result-page text.
+- `unlimitedStorage`: store collected results locally.
 
-1. Run `npm run build`.
-2. Open `chrome://extensions`.
-3. Enable **Developer mode**.
-4. Select **Load unpacked** and choose the generated `dist` directory.
-5. Test importing cities, adding/removing cities, search execution, manual CAPTCHA handling and resume, the unverified-results disclosure, deduplication, deletion, and Excel export.
+## Responsible use
 
-Do not load the repository root; load `dist`.
+Respect Google's terms, privacy and data-protection requirements, and applicable email marketing laws. Do not use collected addresses for unsolicited bulk email. Independently verify addresses before relying on them or contacting anyone.
 
-## Before Chrome Web Store submission
-
-- Confirm the current Google terms/permission issue has been resolved. If not, do not submit or market the automated Google Search workflow as compliant.
-- Run `npm ci` (if a lockfile is committed) or `npm install`, then `npm run build`; inspect the generated `dist` directory.
-- Test the exact packaged build in a clean Chrome profile.
-- Add required PNG extension icons (16×16, 32×32, 48×48 and 128×128) and reference them in `public/manifest.json`.
-- Provide accurate store screenshots and a truthful short/long description.
-- In the Web Store privacy disclosures, declare the handling of email addresses and city lists accurately. State that processing is local only if verified against the complete shipped build.
-- Justify every requested permission: `tabs`, `scripting`, `unlimitedStorage`, and Google Search host access. Remove permissions that are not required.
-- Publish the privacy policy at a stable public URL and ensure it exactly matches the shipped extension.
-- Do not claim that email addresses are verified, that every business is covered, or that the extension is endorsed/approved by Google.
-- Test install, update, uninstall, data deletion, and the extension's behaviour when Google changes its result-page markup.
-
-## Data handling
-
-The current app uses browser IndexedDB for collected results and browser local storage for city/query/page settings and its resume checkpoint. It does not require a CityMail Finder account. Exported spreadsheets are saved by the browser to the user's device. Google receives the search requests directly from the user's browser and handles them under Google's own policies.
-
-## Support
-
-Report bugs through [GitHub Issues](https://github.com/Yash-srivastav16/citymail-finder/issues).
+Support: https://github.com/Yash-srivastav16/citymail-finder/issues
