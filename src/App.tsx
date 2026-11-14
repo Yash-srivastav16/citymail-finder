@@ -233,6 +233,12 @@ export default function App() {
   }
 
   async function run() {
+    // Chrome extension APIs are only available in the installed extension context,
+    // not when this React UI is opened as a normal Vercel website.
+    if (typeof chrome === "undefined" || !chrome.tabs?.create || !chrome.scripting?.executeScript) {
+      setStatus("Google Search collection needs the installed Chrome extension. Build the extension, load the dist folder at chrome://extensions, then open CityMail Finder from Chrome. This website preview is for checking the UI only.");
+      return;
+    }
     if (!cities.length) {
       setStatus("Import or add at least one location.");
       return;
