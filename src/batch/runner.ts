@@ -6,11 +6,14 @@ import {
 
 export type LocationCollectionResult = {
   collectedCount: number;
+  pageIndex: number;
+  paused?: boolean;
 };
 
 export type LocationCollector = (
   location: string,
-  onProgress: (collectedCount: number) => void,
+  startPageIndex: number,
+  onProgress: (collectedCount: number, pageIndex: number) => void,
   shouldPause: () => boolean,
 ) => Promise<LocationCollectionResult>;
 
@@ -23,11 +26,9 @@ export type BatchRunnerOptions = {
   shouldPause: () => boolean;
 };
 
-const pauseWait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
 /**
- * Runs locations sequentially. The collection implementation is injected so
- * the batch engine stays independent of any particular search provider.
+ * Runs locations sequentially. Each collector reports its page checkpoint so
+ * a paused or interrupted location can resume at the exact next page.
  */
 export async function runLocationBatch(options: BatchRunnerOptions): Promise<BatchJob[]> {
   const jobs = options.jobs.map((job) => ({ ...job }));
@@ -55,22 +56,33 @@ export async function runLocationBatch(options: BatchRunnerOptions): Promise<Bat
     try {
       const result = await options.collectLocation(
         job.location,
-        (collectedCount) => {
-          jobs[index] = { ...jobs[index], collectedCount };
+        job.pageIndex,
+        (collectedCount, pageIndex) => {
+          jobs[index] = { ...jobs[index], collectedCount, pageIndex };
           options.onJobsChange(jobs, index);
           options.onCheckpoint(JSON.stringify(createCheckpoint(jobs, index)));
         },
         options.shouldPause,
       );
 
-      if (options.shouldPause()) {
-        jobs[index] = { ...jobs[index], status: "paused", collectedCount: result.collectedCount };
+      if (result.paused || options.shouldPause()) {
+        jobs[index] = {
+          ...jobs[index],
+          status: "paused",
+          collectedCount: result.collectedCount,
+          pageIndex: result.pageIndex,
+        };
         options.onJobsChange(jobs, index);
         options.onCheckpoint(JSON.stringify(createCheckpoint(jobs, index)));
         return jobs;
       }
 
-      jobs[index] = { ...jobs[index], status: "completed", collectedCount: result.collectedCount };
+      jobs[index] = {
+        ...jobs[index],
+        status: "completed",
+        collectedCount: result.collectedCount,
+        pageIndex: result.pageIndex,
+      };
     } catch (error) {
       jobs[index] = {
         ...jobs[index],
