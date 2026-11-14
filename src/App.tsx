@@ -244,7 +244,9 @@ export default function App() {
       : createBatchJobs(cities);
     const hasRunnable = baseJobs.some(job => job.status === "pending" || job.status === "paused");
     const jobs = hasRunnable ? baseJobs : createBatchJobs(cities);
-    const nextIndex = getNextRunnableJobIndex(jobs, Math.min(activeJobIndex, Math.max(0, jobs.length - 1)));
+    // Scan from the beginning so a failed location is retried even when the
+    // last checkpoint cursor had already advanced to the following location.
+    const nextIndex = getNextRunnableJobIndex(jobs, 0);
     const startIndex = nextIndex >= 0 ? nextIndex : 0;
 
     pauseRequested.current = false;
