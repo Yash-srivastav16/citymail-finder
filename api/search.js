@@ -45,6 +45,13 @@ function retryAfterMs(value) {
 
 async function searchProvider(query, city = "", maxResults = 10) {
   const providers = [];
+  if (process.env.SEARXNG_URL) providers.push({ name: "SearXNG", run: async () => {
+    const u = new URL("/search", process.env.SEARXNG_URL); u.searchParams.set("q", query); u.searchParams.set("format", "json");
+    const raw = await fetch(u, { headers: { Accept: "application/json", "User-Agent": UA }, signal: AbortSignal.timeout(12000) });
+    if (!raw.ok) throw new Error("SearXNG HTTP " + raw.status);
+    const body = await raw.json();
+    return (body.results || []).slice(0, maxResults).map(x => ({ url: x.url || "", title: x.title || "", description: x.content || "" }));
+  }});
   if (process.env.FREESEA_API_KEY) providers.push({ name: "Freesea", run: async () => {
     let lastError;
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -68,13 +75,6 @@ async function searchProvider(query, city = "", maxResults = 10) {
       throw lastError;
     }
     throw lastError || new Error("Freesea request failed");
-  }});
-  if (process.env.SEARXNG_URL) providers.push({ name: "SearXNG", run: async () => {
-    const u = new URL("/search", process.env.SEARXNG_URL); u.searchParams.set("q", query); u.searchParams.set("format", "json");
-    const raw = await fetch(u, { headers: { Accept: "application/json", "User-Agent": UA }, signal: AbortSignal.timeout(12000) });
-    if (!raw.ok) throw new Error("SearXNG HTTP " + raw.status);
-    const body = await raw.json();
-    return (body.results || []).slice(0, maxResults).map(x => ({ url: x.url || "", title: x.title || "", description: x.content || "" }));
   }});
   if (process.env.TAVILY_API_KEY) providers.push({ name: "Tavily", run: async () => {
     const raw = await fetch("https://api.tavily.com/search", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ api_key: process.env.TAVILY_API_KEY, query, search_depth: "basic", max_results: maxResults }), signal: AbortSignal.timeout(12000) });
