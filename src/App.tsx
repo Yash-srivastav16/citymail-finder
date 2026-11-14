@@ -83,9 +83,19 @@ export default function App() {
     localStorage.setItem("cm-results-limit-v1", String(maxResults));
 
     const checkpoint = parseCheckpoint(localStorage.getItem(CHECKPOINT_KEY));
-    if (checkpoint && sameLocations(checkpoint.jobs, cities)) {
-      setBatchJobs(checkpoint.jobs);
-      setActiveJobIndex(checkpoint.activeJobIndex);
+    if (checkpoint && cities.length) {
+      const previousByLocation = new Map(
+        checkpoint.jobs.map(job => [job.location.trim().toLocaleLowerCase(), job])
+      );
+      const mergedJobs = createBatchJobs(cities).map(job => {
+        const previous = previousByLocation.get(job.location.toLocaleLowerCase());
+        return previous ? { ...previous, id: job.id, location: job.location } : job;
+      });
+      const nextRunnable = getNextRunnableJobIndex(mergedJobs, 0);
+      const nextActiveIndex = nextRunnable >= 0 ? nextRunnable : Math.max(0, mergedJobs.length - 1);
+      setBatchJobs(mergedJobs);
+      setActiveJobIndex(nextActiveIndex);
+      localStorage.setItem(CHECKPOINT_KEY, JSON.stringify(createCheckpoint(mergedJobs, nextActiveIndex)));
       return;
     }
 
