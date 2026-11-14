@@ -56,11 +56,6 @@ async function readRows(): Promise<Result[]> {
   });
 }
 
-function sameLocations(jobs: BatchJob[], locations: string[]) {
-  return jobs.length === locations.length &&
-    jobs.every((job, index) => job.location.trim().toLocaleLowerCase() === locations[index].trim().toLocaleLowerCase());
-}
-
 export default function App() {
   const [cities, setCities] = useState<string[]>(JSON.parse(localStorage.getItem("cm-cities") || "[]"));
   const [cityInput, setCityInput] = useState("");
