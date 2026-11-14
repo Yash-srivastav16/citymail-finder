@@ -38,6 +38,27 @@ function waitForTab(tabId: number): Promise<void> {
     });
   });
 }
+function navigateTab(tabId: number, url: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      reject(new Error("Google next-results page load timed out"));
+    }, 30000);
+    const listener = (updatedId: number, info: { status?: string }) => {
+      if (updatedId === tabId && info.status === "complete") {
+        window.clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve();
+      }
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.update(tabId, { url }).catch(error => {
+      window.clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(listener);
+      reject(error);
+    });
+  });
+}
 async function extractVisibleEmails(tabId: number) {
   const [injected] = await chrome.scripting.executeScript({
     target: { tabId },
@@ -325,7 +346,7 @@ export default function App() {
         collectLocation: async (city, startPageIndex, onProgress, shouldPause) => {
           const cityEmails = new Set((await readRows()).filter(row => row.city.toLowerCase() === city.toLowerCase()).map(row => row.email.toLowerCase()));
           const maxPages = Math.min(50, Math.max(1, pages));
-          const searchUrl = "https://www.google.com/search?q=" + encodeURIComponent(query.replaceAll("{city}", city).trim()) + "&num=10&filter=0";
+          const searchUrl = "https://www.google.com/search?q=" + encodeURIComponent(query.replaceAll("{city}", city).trim()) + "&num=10&filter=0&start=" + (Math.max(0, startPageIndex) * 10);
           if (googleTabId === undefined) {
             const tab = await chrome.tabs.create({ url: searchUrl, active: false });
             if (typeof tab.id !== "number") throw new Error("Could not open Google Search tab.");
@@ -333,7 +354,7 @@ export default function App() {
             if (tab.status !== "complete") await waitForTab(googleTabId);
           }
 
-          for (let page = Math.max(0, startPageIndex); page < maxPages; page++) {
+          let completedBatches = Math.max(0, startPageIndex);\n          for (let page = Math.max(0, startPageIndex); page < maxPages; page++) {
             if (shouldPause()) return { collectedCount: cityEmails.size, pageIndex: page, paused: true };
             onProgress(cityEmails.size, page);
             setStatus("Scrolling Google Search · " + city + " · result batch " + (page + 1) + "/" + maxPages);
@@ -381,7 +402,7 @@ export default function App() {
               break;
             }
           }
-          return { collectedCount: cityEmails.size, pageIndex: maxPages };
+          return { collectedCount: cityEmails.size, pageIndex: completedBatches };
         },
       });
 
