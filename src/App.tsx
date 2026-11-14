@@ -50,6 +50,58 @@ async function extractVisibleEmails(tabId: number) {
   });
   return injected.result as { captcha: boolean; emails: string[]; title: string; url: string };
 }
+async function scrollGoogleResults(tabId: number) {
+  const [injected] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: async () => {
+      const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+      const resultCount = () => document.querySelectorAll("#search .MjjYud, #search .g, #rso > div").length;
+      let previousHeight = document.documentElement.scrollHeight;
+      let previousCount = resultCount();
+      let stableRounds = 0;
+      let grewDuringScroll = false;
+      let scrolls = 0;
+
+      // Keep scrolling in the same Google tab. On continuous-scroll layouts,
+      // this allows newly appended results to load before we extract emails.
+      for (let i = 0; i < 12; i++) {
+        window.scrollTo(0, document.documentElement.scrollHeight);
+        await sleep(1100);
+        const height = document.documentElement.scrollHeight;
+        const count = resultCount();
+        if (height > previousHeight || count > previousCount) {
+          grewDuringScroll = true;
+          stableRounds = 0;
+        } else {
+          stableRounds++;
+        }
+        previousHeight = height;
+        previousCount = count;
+        scrolls++;
+        if (stableRounds >= 2) break;
+      }
+
+      const bodyText = document.body?.innerText || "";
+      const captcha = /unusual traffic|automated queries|not a robot|our systems have detected|sorry\/.*computer network/i.test(bodyText);
+      const emails = [...new Set((bodyText.match(/[A-Z0-9.!#$%&'*+/=?^`_{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/gi) || []).map(x => x.toLowerCase()))];
+
+      // Desktop Google normally exposes a Next link. Prefer it when the page
+      // does not append more results while scrolling.
+      const next = document.querySelector<HTMLAnchorElement>("#pnnext, a[aria-label='Next'], a[aria-label='More results']") ||
+        [...document.querySelectorAll<HTMLAnchorElement>("a[href]")].find(a => /^(next|more results)$/i.test((a.innerText || a.getAttribute("aria-label") || "").trim()));
+      return {
+        captcha, emails, title: document.title, url: location.href,
+        nextUrl: next?.href || null,
+        scrollLimitReached: scrolls === 12 && stableRounds < 2,
+        scrolls, grewDuringScroll
+      };
+    }
+  });
+  return injected.result as {
+    captcha: boolean; emails: string[]; title: string; url: string;
+    nextUrl: string | null; scrollLimitReached: boolean; scrolls: number; grewDuringScroll: boolean;
+  };
+}
 function dbOpen(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const r = indexedDB.open(DB, 1);
@@ -273,23 +325,20 @@ export default function App() {
         collectLocation: async (city, startPageIndex, onProgress, shouldPause) => {
           const cityEmails = new Set((await readRows()).filter(row => row.city.toLowerCase() === city.toLowerCase()).map(row => row.email.toLowerCase()));
           const maxPages = Math.min(50, Math.max(1, pages));
+          const searchUrl = "https://www.google.com/search?q=" + encodeURIComponent(query.replaceAll("{city}", city).trim()) + "&num=10&filter=0";
+          if (googleTabId === undefined) {
+            const tab = await chrome.tabs.create({ url: searchUrl, active: false });
+            if (typeof tab.id !== "number") throw new Error("Could not open Google Search tab.");
+            googleTabId = tab.id;
+            if (tab.status !== "complete") await waitForTab(googleTabId);
+          }
+
           for (let page = Math.max(0, startPageIndex); page < maxPages; page++) {
             if (shouldPause()) return { collectedCount: cityEmails.size, pageIndex: page, paused: true };
             onProgress(cityEmails.size, page);
-            setStatus("Opening Google Search · " + city + " · page " + (page + 1) + "/" + maxPages);
-            const url = "https://www.google.com/search?q=" + encodeURIComponent(query.replaceAll("{city}", city).trim()) + "&num=10&filter=0&start=" + (page * 10);
-            if (googleTabId === undefined) {
-              const tab = await chrome.tabs.create({ url, active: false });
-              if (typeof tab.id !== "number") throw new Error("Could not open Google Search tab.");
-              googleTabId = tab.id;
-              if (tab.status !== "complete") await waitForTab(googleTabId);
-            } else {
-              const loaded = waitForTab(googleTabId);
-              await chrome.tabs.update(googleTabId, { url });
-              await loaded;
-            }
-            await sleep(1500 + Math.floor(Math.random() * 1000));
-            let pageData = await extractVisibleEmails(googleTabId);
+            setStatus("Scrolling Google Search · " + city + " · result batch " + (page + 1) + "/" + maxPages);
+            await sleep(900);
+            let pageData = await scrollGoogleResults(googleTabId);
             if (pageData.captcha) {
               keepGoogleTabOpen = true;
               await chrome.tabs.update(googleTabId, { active: true });
@@ -297,13 +346,14 @@ export default function App() {
               const deadline = Date.now() + 5 * 60 * 1000;
               while (Date.now() < deadline) {
                 await sleep(1500);
-                try { pageData = await extractVisibleEmails(googleTabId); if (!pageData.captcha) { keepGoogleTabOpen = false; break; } } catch { /* page is navigating */ }
+                try { pageData = await scrollGoogleResults(googleTabId); if (!pageData.captcha) { keepGoogleTabOpen = false; break; } } catch { /* page is navigating */ }
               }
               if (pageData.captcha) {
                 pauseReason = "Google verification remains unresolved. Solve it in the open tab, then select Start / Resume.";
                 return { collectedCount: cityEmails.size, pageIndex: page, paused: true };
               }
             }
+
             const timestamp = new Date().toISOString();
             const rows: Result[] = pageData.emails.filter(email => !cityEmails.has(email.toLowerCase())).map(email => ({
               city, email: email.toLowerCase(), sourceUrl: pageData.url, domain: "google.com",
@@ -311,9 +361,25 @@ export default function App() {
             }));
             if (rows.length) { await saveRows(rows); rows.forEach(row => cityEmails.add(row.email)); setResults(await readRows()); }
             onProgress(cityEmails.size, page + 1);
-            setStatus(city + " · page " + (page + 1) + "/" + maxPages + " · " + cityEmails.size + " unique matches");
+            setStatus(city + " · result batch " + (page + 1) + "/" + maxPages + " · " + pageData.scrolls + " scrolls · " + cityEmails.size + " unique matches");
+
             if (shouldPause()) return { collectedCount: cityEmails.size, pageIndex: page + 1, paused: true };
-            if (page > 0 && rows.length === 0 && /did not match any documents|no results found/i.test(pageData.title)) return { collectedCount: cityEmails.size, pageIndex: page + 1 };
+            if (page + 1 >= maxPages) break;
+
+            if (pageData.nextUrl) {
+              // Desktop Google fallback: automatically follow its Next link in
+              // the same tab when scrolling no longer appends more results.
+              const loaded = waitForTab(googleTabId);
+              await chrome.tabs.update(googleTabId, { url: pageData.nextUrl });
+              await loaded;
+            } else if (pageData.scrollLimitReached) {
+              // A continuous-scroll layout is still appending results. Keep the
+              // same URL and continue scrolling in the next batch iteration.
+              continue;
+            } else {
+              // No additional results and no Next link.
+              break;
+            }
           }
           return { collectedCount: cityEmails.size, pageIndex: maxPages };
         },
@@ -386,7 +452,7 @@ export default function App() {
       <label>Google Search pages per location (1–50)
         <input type="number" min="1" max="10" value={pages} onChange={e => setPages(Math.min(50, Math.max(1, Number(e.target.value) || 1)))}/>
       </label>
-      <p>The extension opens Google Search in Chrome, reads visible result-page text, and advances through the configured pages for each location using one reused tab.</p>
+      <p>The extension scrolls Google Search in one tab to load additional results where continuous scrolling is available. If Google uses numbered desktop pages, it automatically follows the Next link in that same tab.</p>
       <p><strong>Search method:</strong> Chrome tab automation using Google Search pages. No search API key or external provider is configured.</p>
       <p><strong>Important:</strong> Email-shaped matches from search-result snippets are unverified. This version does not crawl linked business websites or verify ownership, validity, deliverability, or business association. Independently confirm each address before relying on it or contacting anyone.</p>
     </section>
@@ -443,7 +509,7 @@ export default function App() {
     </section>
 
     <footer>
-      Google Search pages are opened in Chrome and visible result text is inspected. Verification challenges require manual handling. The extension does not bypass CAPTCHA or access controls. All collected email matches are unverified.
+      Google Search is scrolled in Chrome; where continuous scrolling is unavailable, the extension follows Google’s Next link automatically in the same tab. Verification challenges require manual handling. The extension does not bypass CAPTCHA or access controls. All collected email matches are unverified.
     </footer>
   </main>;
 }
