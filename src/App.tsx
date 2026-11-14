@@ -71,6 +71,79 @@ async function extractVisibleEmails(tabId: number) {
   });
   return injected.result as { captcha: boolean; emails: string[]; title: string; url: string };
 }
+
+async function appendNextGoogleResults(tabId: number, pageNumber: number) {
+  const [injected] = await chrome.scripting.executeScript({
+    target: { tabId },
+    args: [pageNumber],
+    func: async (page: number) => {
+      const bodyText = document.body?.innerText || "";
+      const captchaPattern = /unusual traffic|automated queries|not a robot|our systems have detected|sorry\\/.*computer network/i;
+      if (captchaPattern.test(bodyText)) return { captcha: true, appended: 0, url: location.href, reason: "Google verification required" };
+
+      const current = new URL(location.href);
+      const currentStart = Number(current.searchParams.get("start") || "0");
+      const next = new URL(current.href);
+      next.searchParams.set("start", String(currentStart + 10));
+      next.searchParams.set("num", "10");
+      next.searchParams.set("filter", "0");
+
+      let response: Response;
+      try {
+        response = await fetch(next.href, { credentials: "include", redirect: "follow" });
+      } catch {
+        return { captcha: false, appended: 0, url: location.href, reason: "Could not load the next Google result set in the current tab" };
+      }
+      const html = await response.text();
+      const parsed = new DOMParser().parseFromString(html, "text/html");
+      const parsedText = parsed.body?.innerText || "";
+      if (captchaPattern.test(parsedText) || /sorry\\/index|consent\\.google/i.test(response.url)) {
+        return { captcha: true, appended: 0, url: location.href, reason: "Google returned a verification or consent page" };
+      }
+
+      const sourceRoot = parsed.querySelector("#rso") || parsed.querySelector("#search");
+      const targetRoot = document.querySelector("#rso") || document.querySelector("#search");
+      if (!sourceRoot || !targetRoot) {
+        return { captcha: false, appended: 0, url: location.href, reason: "Google result container was not found" };
+      }
+
+      const cardSelector = ".MjjYud, .g";
+      let cards = Array.from(sourceRoot.querySelectorAll<HTMLElement>(cardSelector))
+        .filter(card => !!card.querySelector("a[href] h3"));
+      cards = cards.filter(card => !card.parentElement?.closest(cardSelector));
+      if (!cards.length) {
+        cards = Array.from(sourceRoot.children).filter((node): node is HTMLElement =>
+          node instanceof HTMLElement && !!node.querySelector("a[href] h3")
+        );
+      }
+
+      const existing = new Set(Array.from(targetRoot.querySelectorAll<HTMLAnchorElement>("a[href] h3"))
+        .map(heading => heading.closest("a")?.href || "")
+        .filter(Boolean));
+      const fresh = cards.filter(card => {
+        const link = card.querySelector<HTMLAnchorElement>("a[href] h3")?.closest("a");
+        return !!link?.href && !existing.has(link.href);
+      });
+      if (!fresh.length) {
+        return { captcha: false, appended: 0, url: location.href, reason: "No new Google result cards were found" };
+      }
+
+      const marker = document.createElement("div");
+      marker.setAttribute("data-citymail-page-marker", String(page));
+      marker.textContent = "More Google results · batch " + page;
+      marker.style.cssText = "margin:24px 0 12px;padding:10px 0;border-top:1px solid #dadce0;color:#5f6368;font-size:13px;font-weight:600";
+      targetRoot.appendChild(marker);
+
+      fresh.forEach((card, index) => {
+        const clone = document.importNode(card, true) as HTMLElement;
+        clone.setAttribute("data-citymail-appended", String(page));
+        targetRoot.appendChild(clone);
+      });
+      return { captcha: false, appended: fresh.length, url: location.href, reason: "" };
+    }
+  });
+  return injected.result as { captcha: boolean; appended: number; url: string; reason: string };
+}
 async function scrollGoogleResults(tabId: number) {
   const [injected] = await chrome.scripting.executeScript({
     target: { tabId },
@@ -390,20 +463,22 @@ export default function App() {
             if (shouldPause()) return { collectedCount: cityEmails.size, pageIndex: page + 1, paused: true };
             if (page + 1 >= maxPages) break;
 
-            if (pageData.nextUrl) {
-              // Desktop Google fallback: automatically follow its Next link in
-              // the same tab when scrolling no longer appends more results.
-              const loaded = waitForTab(googleTabId);
-              await chrome.tabs.update(googleTabId, { url: pageData.nextUrl });
-              await loaded;
-            } else if (pageData.scrollLimitReached) {
-              // A continuous-scroll layout is still appending results. Keep the
-              // same URL and continue scrolling in the next batch iteration.
-              continue;
-            } else {
-              // No additional results and no Next link.
+            // Infy-style AutoPager: request the next Google result set from the
+            // current page session and append its result cards into the existing
+            // #rso container. The visible tab URL never changes and Next is
+            // never clicked or followed through tab navigation.
+            const appended = await appendNextGoogleResults(googleTabId, page + 2);
+            if (appended.captcha) {
+              keepGoogleTabOpen = true;
+              await chrome.tabs.update(googleTabId, { active: true });
+              pauseReason = "Google verification is required before more results can load. Solve it manually in the open tab, then select Start / Resume.";
+              return { collectedCount: cityEmails.size, pageIndex: page + 1, paused: true };
+            }
+            if (!appended.appended) {
+              setStatus(city + " · stopped after " + (page + 1) + " result batches · " + appended.reason);
               break;
             }
+            setStatus(city + " · appended " + appended.appended + " more result cards in the same Google page.");
           }
           return { collectedCount: cityEmails.size, pageIndex: completedBatches };
         },
@@ -476,7 +551,7 @@ export default function App() {
       <label>Google Search pages per location (1–50)
         <input type="number" min="1" max="10" value={pages} onChange={e => setPages(Math.min(50, Math.max(1, Number(e.target.value) || 1)))}/>
       </label>
-      <p>The extension scrolls Google Search in one tab to load additional results where continuous scrolling is available. If Google uses numbered desktop pages, it automatically follows the Next link in that same tab.</p>
+      <p>The extension keeps one Google Search URL open and appends subsequent result sets into the same results list. It does not click Next, navigate to another results page, or open another tab. Results are loaded using the current Google browser session; verification challenges require manual handling.</p>
       <p><strong>Search method:</strong> Chrome tab automation using Google Search pages. No search API key or external provider is configured.</p>
       <p><strong>Important:</strong> Email-shaped matches from search-result snippets are unverified. This version does not crawl linked business websites or verify ownership, validity, deliverability, or business association. Independently confirm each address before relying on it or contacting anyone.</p>
     </section>
@@ -533,7 +608,7 @@ export default function App() {
     </section>
 
     <footer>
-      Google Search is scrolled in Chrome; where continuous scrolling is unavailable, the extension follows Google’s Next link automatically in the same tab. Verification challenges require manual handling. The extension does not bypass CAPTCHA or access controls. All collected email matches are unverified.
+      Google Search stays on one URL while additional result cards are appended into the current page. Verification challenges require manual handling. The extension does not bypass CAPTCHA or access controls. All collected email matches are unverified.
     </footer>
   </main>;
 }
