@@ -348,7 +348,7 @@ export default function App() {
           const maxPages = Math.min(50, Math.max(1, pages));
           const searchUrl = "https://www.google.com/search?q=" + encodeURIComponent(query.replaceAll("{city}", city).trim()) + "&num=10&filter=0&start=" + (Math.max(0, startPageIndex) * 10);
           if (googleTabId === undefined) {
-            const tab = await chrome.tabs.create({ url: searchUrl, active: false });
+            const tab = await chrome.tabs.create({ url: searchUrl, active: true });
             if (typeof tab.id !== "number") throw new Error("Could not open Google Search tab.");
             googleTabId = tab.id;
             if (tab.status !== "complete") await waitForTab(googleTabId);
