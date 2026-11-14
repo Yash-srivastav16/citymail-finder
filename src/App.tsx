@@ -11,12 +11,45 @@ import {
 import { runLocationBatch } from "./batch/runner";
 
 type Result = { city: string; email: string; sourceUrl: string; domain: string; sourceType: string; createdAt: string };
-type SearchApiResult = Partial<Result> & { city?: string; email: string };
 const DB = "citymail-finder";
 const CHECKPOINT_KEY = "cm-batch-checkpoint-v1";
 const LEGACY_CHECKPOINT_KEY = "cm-search-checkpoint-v1";
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "https://citymail-finder.vercel.app").replace(/\/$/, "");
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+function waitForTab(tabId: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => { chrome.tabs.onUpdated.removeListener(listener); reject(new Error("Google page load timed out")); }, 30000);
+    const listener = (updatedId: number, info: { status?: string }) => {
+      if (updatedId === tabId && info.status === "complete") {
+        window.clearTimeout(timer); chrome.tabs.onUpdated.removeListener(listener); resolve();
+      }
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+    chrome.tabs.get(tabId).then(tab => {
+      if (tab.status === "complete") {
+        window.clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve();
+      }
+    }).catch(error => {
+      window.clearTimeout(timer);
+      chrome.tabs.onUpdated.removeListener(listener);
+      reject(error);
+    });
+  });
+}
+async function extractVisibleEmails(tabId: number) {
+  const [injected] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      const text = document.body?.innerText || "";
+      const captcha = /unusual traffic|automated queries|not a robot|our systems have detected|sorry\/.*computer network/i.test(text);
+      const emails = [...new Set((text.match(/[A-Z0-9.!#$%&'*+/=?^`_{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/gi) || []).map(x => x.toLowerCase()))];
+      return { captcha, emails, title: document.title, url: location.href };
+    }
+  });
+  return injected.result as { captcha: boolean; emails: string[]; title: string; url: string };
+}
 function dbOpen(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const r = indexedDB.open(DB, 1);
@@ -65,7 +98,7 @@ export default function App() {
   const [cities, setCities] = useState<string[]>(JSON.parse(localStorage.getItem("cm-cities") || "[]"));
   const [cityInput, setCityInput] = useState("");
   const [query, setQuery] = useState(localStorage.getItem("cm-query-v1") || '"{city}" business email contact');
-  const [maxResults, setMaxResults] = useState(Math.min(10, Math.max(1, Number(localStorage.getItem("cm-results-limit-v1") || 10))));
+  const [pages, setPages] = useState(Math.min(50, Math.max(1, Number(localStorage.getItem("cm-pages-v2") || 10))));
   const [results, setResults] = useState<Result[]>([]);
   const [status, setStatus] = useState("Ready");
   const [busy, setBusy] = useState(false);
@@ -80,7 +113,7 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("cm-cities", JSON.stringify(cities));
     localStorage.setItem("cm-query-v1", query);
-    localStorage.setItem("cm-results-limit-v1", String(maxResults));
+    localStorage.setItem("cm-pages-v2", String(pages));
 
     const checkpoint = parseCheckpoint(localStorage.getItem(CHECKPOINT_KEY));
     if (checkpoint && cities.length) {
@@ -128,7 +161,7 @@ export default function App() {
     setBatchJobs([]);
     setActiveJobIndex(0);
     if (localStorage.getItem(CHECKPOINT_KEY)) localStorage.removeItem(CHECKPOINT_KEY);
-  }, [cities, maxResults, query]);
+  }, [cities, pages, query]);
 
   async function importCities(file?: File) {
     if (!file) return;
@@ -191,7 +224,7 @@ export default function App() {
     setCities([]);
     setCityInput("");
     setQuery('"{city}" business email contact');
-    setMaxResults(10);
+    setPages(10);
     setBatchJobs([]);
     setActiveJobIndex(0);
     localStorage.removeItem(CHECKPOINT_KEY);
@@ -218,6 +251,8 @@ export default function App() {
     setBusy(true);
     setBatchJobs(jobs);
     let pauseReason = "";
+    let googleTabId: number | undefined;
+    let keepGoogleTabOpen = false;
 
     try {
       const completedJobs = await runLocationBatch({
@@ -230,75 +265,51 @@ export default function App() {
         },
         onCheckpoint: value => localStorage.setItem(CHECKPOINT_KEY, value),
         collectLocation: async (city, startPageIndex, onProgress, shouldPause) => {
-          const cityEmails = new Set(
-            (await readRows())
-              .filter(row => row.city.toLocaleLowerCase() === city.toLocaleLowerCase())
-              .map(row => row.email.toLowerCase())
-          );
-
-          if (startPageIndex >= 1) {
-            return { collectedCount: cityEmails.size, pageIndex: 1 };
-          }
-          if (shouldPause()) {
-            return { collectedCount: cityEmails.size, pageIndex: 0, paused: true };
-          }
-
-          onProgress(cityEmails.size, 0);
-          setStatus("Searching " + city + " (" + maxResults + " results maximum) via search API…");
-
-          let response: Response;
-          try {
-            response = await fetch(API_BASE_URL + "/api/search", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ city, query: query.replaceAll("{city}", city).trim(), maxResults }),
-              signal: AbortSignal.timeout(30000),
-            });
-          } catch (error) {
-            throw new Error("Could not reach the search API at " + API_BASE_URL + ". " +
-              (error instanceof Error ? error.message : "Network request failed"));
-          }
-
-          const body = await response.json().catch(() => ({})) as {
-            ok?: boolean;
-            provider?: string;
-            error?: string;
-            code?: string;
-            results?: SearchApiResult[];
-          };
-
-          if (!response.ok) {
-            if (response.status === 429 || body.code === "RATE_LIMITED" || body.code === "CAPTCHA_REQUIRED") {
-              pauseReason = body.error || "Search provider rate limit or verification required. Resolve it with the provider, then resume.";
-              return { collectedCount: cityEmails.size, pageIndex: 0, paused: true };
+          const cityEmails = new Set((await readRows()).filter(row => row.city.toLowerCase() === city.toLowerCase()).map(row => row.email.toLowerCase()));
+          const maxPages = Math.min(50, Math.max(1, pages));
+          for (let page = Math.max(0, startPageIndex); page < maxPages; page++) {
+            if (shouldPause()) return { collectedCount: cityEmails.size, pageIndex: page, paused: true };
+            onProgress(cityEmails.size, page);
+            setStatus("Opening Google Search · " + city + " · page " + (page + 1) + "/" + maxPages);
+            const url = "https://www.google.com/search?q=" + encodeURIComponent(query.replaceAll("{city}", city).trim()) + "&num=10&filter=0&start=" + (page * 10);
+            if (googleTabId === undefined) {
+              const tab = await chrome.tabs.create({ url, active: false });
+              if (typeof tab.id !== "number") throw new Error("Could not open Google Search tab.");
+              googleTabId = tab.id;
+              if (tab.status !== "complete") await waitForTab(googleTabId);
+            } else {
+              const loaded = waitForTab(googleTabId);
+              await chrome.tabs.update(googleTabId, { url });
+              await loaded;
             }
-            throw new Error(body.error || "Search API returned HTTP " + response.status);
-          }
-
-          if (body.ok !== true || !Array.isArray(body.results)) throw new Error("Search API returned an unexpected response. Check the configured API endpoint.");
-
-          const found = body.results.slice(0, maxResults);
-          const timestamp = new Date().toISOString();
-          const rows: Result[] = found
-            .filter(item => typeof item.email === "string" && item.email.includes("@"))
-            .map(item => ({
-              city: item.city || city,
-              email: item.email.toLowerCase(),
-              sourceUrl: item.sourceUrl || "",
-              domain: item.domain || "",
-              sourceType: item.sourceType || "search-result",
-              createdAt: item.createdAt || timestamp,
+            await sleep(1500 + Math.floor(Math.random() * 1000));
+            let pageData = await extractVisibleEmails(googleTabId);
+            if (pageData.captcha) {
+              keepGoogleTabOpen = true;
+              await chrome.tabs.update(googleTabId, { active: true });
+              setStatus("Google verification required. Solve it manually in the open tab; collection will wait up to 5 minutes.");
+              const deadline = Date.now() + 5 * 60 * 1000;
+              while (Date.now() < deadline) {
+                await sleep(1500);
+                try { pageData = await extractVisibleEmails(googleTabId); if (!pageData.captcha) { keepGoogleTabOpen = false; break; } } catch { /* page is navigating */ }
+              }
+              if (pageData.captcha) {
+                pauseReason = "Google verification remains unresolved. Solve it in the open tab, then select Start / Resume.";
+                return { collectedCount: cityEmails.size, pageIndex: page, paused: true };
+              }
+            }
+            const timestamp = new Date().toISOString();
+            const rows: Result[] = pageData.emails.filter(email => !cityEmails.has(email.toLowerCase())).map(email => ({
+              city, email: email.toLowerCase(), sourceUrl: pageData.url, domain: "google.com",
+              sourceType: "google-visible-result", createdAt: timestamp,
             }));
-
-          if (rows.length) {
-            await saveRows(rows);
-            rows.forEach(row => cityEmails.add(row.email));
-            setResults(await readRows());
+            if (rows.length) { await saveRows(rows); rows.forEach(row => cityEmails.add(row.email)); setResults(await readRows()); }
+            onProgress(cityEmails.size, page + 1);
+            setStatus(city + " · page " + (page + 1) + "/" + maxPages + " · " + cityEmails.size + " unique matches");
+            if (shouldPause()) return { collectedCount: cityEmails.size, pageIndex: page + 1, paused: true };
+            if (page > 0 && rows.length === 0 && /did not match any documents|no results found/i.test(pageData.title)) return { collectedCount: cityEmails.size, pageIndex: page + 1 };
           }
-
-          onProgress(cityEmails.size, 1);
-          setStatus(city + " completed via " + (body.provider || "search provider") + ". Found " + rows.length + " matches.");
-          return { collectedCount: cityEmails.size, pageIndex: 1 };
+          return { collectedCount: cityEmails.size, pageIndex: maxPages };
         },
       });
 
@@ -317,6 +328,7 @@ export default function App() {
     } catch (e) {
       setStatus("Batch stopped: " + (e as Error).message);
     } finally {
+      if (googleTabId !== undefined && !keepGoogleTabOpen) await chrome.tabs.remove(googleTabId).catch(() => undefined);
       setBusy(false);
     }
   }
@@ -365,11 +377,11 @@ export default function App() {
       <label>Search query (use {"{city}"} where the location name should appear)
         <input value={query} onChange={e => setQuery(e.target.value)}/>
       </label>
-      <label>Maximum search results per location (1–10)
-        <input type="number" min="1" max="10" value={maxResults} onChange={e => setMaxResults(Math.min(10, Math.max(1, Number(e.target.value) || 1)))}/>
+      <label>Google Search pages per location (1–50)
+        <input type="number" min="1" max="10" value={pages} onChange={e => setPages(Math.min(50, Math.max(1, Number(e.target.value) || 1)))}/>
       </label>
-      <p>One search API request is made for each location. After the configured results are collected, the batch automatically moves to the next location.</p>
-      <p><strong>Search provider:</strong> SearXNG is preferred when configured on the backend. The API may use its configured fallback provider if SearXNG is unavailable.</p>
+      <p>The extension opens Google Search in Chrome, reads visible result-page text, and advances through the configured pages for each location using one reused tab.</p>
+      <p><strong>Search method:</strong> Chrome tab automation using Google Search pages. No search API key or external provider is configured.</p>
       <p><strong>Important:</strong> Email-shaped matches from search-result snippets are unverified. This version does not crawl linked business websites or verify ownership, validity, deliverability, or business association. Independently confirm each address before relying on it or contacting anyone.</p>
     </section>
 
@@ -425,7 +437,7 @@ export default function App() {
     </section>
 
     <footer>
-      Search requests are sent to the configured CityMail Finder API and its configured search provider. The extension does not automate Google Search, solve CAPTCHA, or bypass provider access controls. All collected email matches are unverified.
+      Google Search pages are opened in Chrome and visible result text is inspected. Verification challenges require manual handling. The extension does not bypass CAPTCHA or access controls. All collected email matches are unverified.
     </footer>
   </main>;
 }
