@@ -121,9 +121,12 @@ async function appendNextGoogleResults(tabId: number, pageNumber: number) {
       const existing = new Set(Array.from(targetRoot.querySelectorAll<HTMLAnchorElement>("a[href] h3"))
         .map(heading => heading.closest("a")?.href || "")
         .filter(Boolean));
+      const seen = new Set(existing);
       const fresh = cards.filter(card => {
         const link = card.querySelector<HTMLAnchorElement>("a[href] h3")?.closest("a");
-        return !!link?.href && !existing.has(link.href);
+        if (!link?.href || seen.has(link.href)) return false;
+        seen.add(link.href);
+        return true;
       });
       if (!fresh.length) {
         return { captcha: false, appended: 0, url: location.href, reason: "No new Google result cards were found" };
@@ -163,7 +166,7 @@ async function scrollGoogleResults(tabId: number) {
       }
       const bodyText = document.body?.innerText || "";
       const captcha = /unusual traffic|automated queries|not a robot|our systems have detected|computer network/i.test(bodyText);
-      const emails = [...new Set((bodyText.match(/[A-Z0-9.!#$%&'*+/=?^`_{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/gi) || []).map(x => x.toLowerCase()))];
+      const emails = [...new Set((bodyText.match(/[A-Z0-9.!#$%&'*+/=?^`_{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/gi) || []).map(x => x.toLowerCase()))];
       return {
         captcha, emails, title: document.title, url: location.href,
         nextUrl: null,
