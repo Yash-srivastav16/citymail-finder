@@ -11,9 +11,11 @@ import {
 import { runLocationBatch } from "./batch/runner";
 
 type Result = { city: string; email: string; sourceUrl: string; domain: string; sourceType: string; createdAt: string };
+type SearchApiResult = Partial<Result> & { city?: string; email: string };
 const DB = "citymail-finder";
 const CHECKPOINT_KEY = "cm-batch-checkpoint-v1";
 const LEGACY_CHECKPOINT_KEY = "cm-search-checkpoint-v1";
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "https://citymail-finder.vercel.app").replace(/\/$/, "");
 
 function dbOpen(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -53,48 +55,6 @@ async function readRows(): Promise<Result[]> {
     r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error);
   });
 }
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-function waitForTab(tabId: number): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = window.setTimeout(() => {
-      chrome.tabs.onUpdated.removeListener(listener);
-      reject(new Error("Google page load timed out"));
-    }, 30000);
-    const listener = (updatedId: number, info: { status?: string }) => {
-      if (updatedId === tabId && info.status === "complete") {
-        window.clearTimeout(timer);
-        chrome.tabs.onUpdated.removeListener(listener);
-        resolve();
-      }
-    };
-    chrome.tabs.onUpdated.addListener(listener);
-    chrome.tabs.get(tabId).then(tab => {
-      if (tab.status === "complete") {
-        window.clearTimeout(timer);
-        chrome.tabs.onUpdated.removeListener(listener);
-        resolve();
-      }
-    }).catch(error => {
-      window.clearTimeout(timer);
-      chrome.tabs.onUpdated.removeListener(listener);
-      reject(error);
-    });
-  });
-}
-
-async function extractVisibleEmails(tabId: number) {
-  const [injected] = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: () => {
-      const text = document.body?.innerText || "";
-      const captcha = /unusual traffic|automated queries|not a robot|our systems have detected|sorry\/.*computer network/i.test(text);
-      const emails = [...new Set((text.match(/[A-Z0-9.!#$%&'*+/=?^`_{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/gi) || []).map(x => x.toLowerCase()))];
-      return { captcha, emails, title: document.title, url: location.href };
-    }
-  });
-  return injected.result as { captcha: boolean; emails: string[]; title: string; url: string };
-}
 
 function sameLocations(jobs: BatchJob[], locations: string[]) {
   return jobs.length === locations.length &&
@@ -105,7 +65,7 @@ export default function App() {
   const [cities, setCities] = useState<string[]>(JSON.parse(localStorage.getItem("cm-cities") || "[]"));
   const [cityInput, setCityInput] = useState("");
   const [query, setQuery] = useState(localStorage.getItem("cm-query-v1") || '"{city}" business email contact');
-  const [pages, setPages] = useState(Number(localStorage.getItem("cm-pages-v2") || 10));
+  const [maxResults, setMaxResults] = useState(Math.min(10, Math.max(1, Number(localStorage.getItem("cm-results-limit-v1") || 10))));
   const [results, setResults] = useState<Result[]>([]);
   const [status, setStatus] = useState("Ready");
   const [busy, setBusy] = useState(false);
@@ -119,8 +79,8 @@ export default function App() {
 
   useEffect(() => {
     localStorage.setItem("cm-cities", JSON.stringify(cities));
-    localStorage.setItem("cm-pages-v2", String(pages));
     localStorage.setItem("cm-query-v1", query);
+    localStorage.setItem("cm-results-limit-v1", String(maxResults));
 
     const checkpoint = parseCheckpoint(localStorage.getItem(CHECKPOINT_KEY));
     if (checkpoint && sameLocations(checkpoint.jobs, cities)) {
@@ -129,19 +89,19 @@ export default function App() {
       return;
     }
 
-    // Migrate an older city/page checkpoint without losing its resume position.
+    // Migrate the older city/page checkpoint. The API collector performs one
+    // search request per location, so the current location restarts once.
     const legacyValue = localStorage.getItem(LEGACY_CHECKPOINT_KEY);
     if (legacyValue && cities.length) {
       try {
-        const legacy = JSON.parse(legacyValue) as { cityIndex?: number; pageIndex?: number };
-        if (Number.isInteger(legacy.cityIndex) && Number.isInteger(legacy.pageIndex) &&
-          (legacy.cityIndex as number) >= 0 && (legacy.cityIndex as number) < cities.length &&
-          (legacy.pageIndex as number) >= 0) {
+        const legacy = JSON.parse(legacyValue) as { cityIndex?: number };
+        if (Number.isInteger(legacy.cityIndex) &&
+          (legacy.cityIndex as number) >= 0 && (legacy.cityIndex as number) < cities.length) {
           const migrated = createBatchJobs(cities).map((job, index) => ({
             ...job,
             status: index < (legacy.cityIndex as number) ? "completed" as const :
               index === legacy.cityIndex ? "paused" as const : "pending" as const,
-            pageIndex: index === legacy.cityIndex ? legacy.pageIndex as number : 0,
+            pageIndex: 0,
           }));
           const migratedIndex = legacy.cityIndex as number;
           setBatchJobs(migrated);
@@ -158,7 +118,7 @@ export default function App() {
     setBatchJobs([]);
     setActiveJobIndex(0);
     if (localStorage.getItem(CHECKPOINT_KEY)) localStorage.removeItem(CHECKPOINT_KEY);
-  }, [cities, pages, query]);
+  }, [cities, maxResults, query]);
 
   async function importCities(file?: File) {
     if (!file) return;
@@ -169,7 +129,7 @@ export default function App() {
       if (!header) throw new Error('Excel must contain a column named "City".');
       const imported = rows.map(row => String(row[header] || "").trim()).filter(Boolean);
       setCities(old => [...new Set([...old, ...imported])]);
-      setStatus("Imported " + imported.length + " city rows.");
+      setStatus("Imported " + imported.length + " location rows.");
     } catch (e) {
       setStatus("Excel import failed: " + (e as Error).message);
     }
@@ -187,17 +147,17 @@ export default function App() {
     setActiveJobIndex(0);
     localStorage.removeItem(CHECKPOINT_KEY);
     localStorage.removeItem(LEGACY_CHECKPOINT_KEY);
-    setStatus("Removed city: " + city + ". Batch progress was reset; start again when ready.");
+    setStatus("Removed location: " + city + ". Batch progress was reset; start again when ready.");
   }
 
   function clearCities() {
-    if (!window.confirm("Remove all saved cities? Collected emails will be kept.")) return;
+    if (!window.confirm("Remove all saved locations? Collected emails will be kept.")) return;
     setCities([]);
     setBatchJobs([]);
     setActiveJobIndex(0);
     localStorage.removeItem(CHECKPOINT_KEY);
     localStorage.removeItem(LEGACY_CHECKPOINT_KEY);
-    setStatus("All cities removed. Collected emails are still saved.");
+    setStatus("All locations removed. Collected emails are still saved.");
   }
 
   async function removeEmail(email: string) {
@@ -215,27 +175,23 @@ export default function App() {
   }
 
   async function clearAllData() {
-    if (!window.confirm("Delete all saved cities, collected emails, and search progress? This cannot be undone.")) return;
+    if (!window.confirm("Delete all saved locations, collected emails, and search progress? This cannot be undone.")) return;
     await clearRows();
     setResults([]);
     setCities([]);
     setCityInput("");
     setQuery('"{city}" business email contact');
-    setPages(10);
+    setMaxResults(10);
     setBatchJobs([]);
     setActiveJobIndex(0);
     localStorage.removeItem(CHECKPOINT_KEY);
     localStorage.removeItem(LEGACY_CHECKPOINT_KEY);
-    setStatus("All saved cities, emails, search settings, and batch progress have been cleared.");
+    setStatus("All saved locations, emails, search settings, and batch progress have been cleared.");
   }
 
   async function run() {
     if (!cities.length) {
-      setStatus("Import or add at least one city.");
-      return;
-    }
-    if (!chrome?.tabs || !chrome?.scripting) {
-      setStatus("Open this tool from the installed Chrome extension.");
+      setStatus("Import or add at least one location.");
       return;
     }
 
@@ -244,16 +200,14 @@ export default function App() {
       : createBatchJobs(cities);
     const hasRunnable = baseJobs.some(job => job.status === "pending" || job.status === "paused");
     const jobs = hasRunnable ? baseJobs : createBatchJobs(cities);
-    // Scan from the beginning so a failed location is retried even when the
-    // last checkpoint cursor had already advanced to the following location.
+    // Start at the earliest runnable item so failed locations are retried too.
     const nextIndex = getNextRunnableJobIndex(jobs, 0);
     const startIndex = nextIndex >= 0 ? nextIndex : 0;
 
     pauseRequested.current = false;
     setBusy(true);
     setBatchJobs(jobs);
-    let tabId: number | undefined;
-    let keepTabOpen = false;
+    let pauseReason = "";
 
     try {
       const completedJobs = await runLocationBatch({
@@ -271,78 +225,68 @@ export default function App() {
               .filter(row => row.city.toLocaleLowerCase() === city.toLocaleLowerCase())
               .map(row => row.email.toLowerCase())
           );
-          const pageLimit = Math.min(50, Math.max(1, pages));
-          const search = query.replaceAll("{city}", city).trim();
 
-          for (let page = startPageIndex; page < pageLimit; page++) {
-            if (shouldPause()) {
-              return { collectedCount: cityEmails.size, pageIndex: page, paused: true };
-            }
-
-            // Persist the current page before navigation. If the extension closes
-            // mid-request, resume retries this page instead of skipping it.
-            onProgress(cityEmails.size, page);
-            const url = "https://www.google.com/search?q=" + encodeURIComponent(search) + "&num=10&filter=0&start=" + (page * 10);
-            setStatus("Processing " + city + " · page " + (page + 1) + "/" + pageLimit);
-
-            if (tabId === undefined) {
-              const tab = await chrome.tabs.create({ url, active: false });
-              if (tab.id === undefined) throw new Error("Could not open Google tab.");
-              tabId = tab.id;
-              if (tab.status !== "complete") await waitForTab(tabId);
-            } else {
-              const loaded = waitForTab(tabId);
-              await chrome.tabs.update(tabId, { url });
-              await loaded;
-            }
-
-            await sleep(1500 + Math.floor(Math.random() * 1000));
-            let pageData = await extractVisibleEmails(tabId);
-
-            if (pageData.captcha) {
-              keepTabOpen = true;
-              await chrome.tabs.update(tabId, { active: true });
-              setStatus("Verification required at " + city + ", page " + (page + 1) + ". Complete it manually in the Google tab; this batch will wait up to 5 minutes.");
-              const deadline = Date.now() + 5 * 60 * 1000;
-              while (Date.now() < deadline && !shouldPause()) {
-                await sleep(1500);
-                try {
-                  pageData = await extractVisibleEmails(tabId);
-                  if (!pageData.captcha) {
-                    keepTabOpen = false;
-                    setStatus("Verification cleared. Resuming " + city + " · page " + (page + 1) + "/" + pageLimit);
-                    break;
-                  }
-                } catch {
-                  // The challenge page may briefly navigate while the user verifies.
-                }
-              }
-              if (pageData.captcha) {
-                setStatus("Batch paused at " + city + ", page " + (page + 1) + ". Complete verification manually, then select Resume.");
-                return { collectedCount: cityEmails.size, pageIndex: page, paused: true };
-              }
-            }
-
-            const rows: Result[] = pageData.emails.map(email => ({
-              city,
-              email,
-              sourceUrl: pageData.url,
-              domain: "google.com",
-              sourceType: "google-visible-result",
-              createdAt: new Date().toISOString(),
-            }));
-            if (rows.length) {
-              await saveRows(rows);
-              rows.forEach(row => cityEmails.add(row.email.toLowerCase()));
-              setResults(await readRows());
-            }
-
-            onProgress(cityEmails.size, page + 1);
-            if (page > 0 && pageData.emails.length === 0 &&
-              /did not match any documents|no results found/i.test(pageData.title)) break;
+          if (startPageIndex >= 1) {
+            return { collectedCount: cityEmails.size, pageIndex: 1 };
+          }
+          if (shouldPause()) {
+            return { collectedCount: cityEmails.size, pageIndex: 0, paused: true };
           }
 
-          return { collectedCount: cityEmails.size, pageIndex: pageLimit };
+          onProgress(cityEmails.size, 0);
+          setStatus("Searching " + city + " (" + maxResults + " results maximum) via search API…");
+
+          let response: Response;
+          try {
+            response = await fetch(API_BASE_URL + "/api/search", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ city, query: query.replaceAll("{city}", city).trim(), maxResults }),
+              signal: AbortSignal.timeout(30000),
+            });
+          } catch (error) {
+            throw new Error("Could not reach the search API at " + API_BASE_URL + ". " +
+              (error instanceof Error ? error.message : "Network request failed"));
+          }
+
+          const body = await response.json().catch(() => ({})) as {
+            ok?: boolean;
+            provider?: string;
+            error?: string;
+            code?: string;
+            results?: SearchApiResult[];
+          };
+
+          if (!response.ok) {
+            if (response.status === 429 || body.code === "RATE_LIMITED" || body.code === "CAPTCHA_REQUIRED") {
+              pauseReason = body.error || "Search provider rate limit or verification required. Resolve it with the provider, then resume.";
+              return { collectedCount: cityEmails.size, pageIndex: 0, paused: true };
+            }
+            throw new Error(body.error || "Search API returned HTTP " + response.status);
+          }
+
+          const found = Array.isArray(body.results) ? body.results : [];
+          const timestamp = new Date().toISOString();
+          const rows: Result[] = found
+            .filter(item => typeof item.email === "string" && item.email.includes("@"))
+            .map(item => ({
+              city: item.city || city,
+              email: item.email.toLowerCase(),
+              sourceUrl: item.sourceUrl || "",
+              domain: item.domain || "",
+              sourceType: item.sourceType || "search-result",
+              createdAt: item.createdAt || timestamp,
+            }));
+
+          if (rows.length) {
+            await saveRows(rows);
+            rows.forEach(row => cityEmails.add(row.email));
+            setResults(await readRows());
+          }
+
+          onProgress(cityEmails.size, 1);
+          setStatus(city + " completed via " + (body.provider || "search provider") + ". Found " + rows.length + " matches.");
+          return { collectedCount: cityEmails.size, pageIndex: 1 };
         },
       });
 
@@ -351,7 +295,7 @@ export default function App() {
       const hasPaused = completedJobs.some(job => job.status === "paused");
       const failed = completedJobs.filter(job => job.status === "failed");
       if (hasPaused) {
-        setStatus("Batch paused. " + progress.completed + "/" + progress.total + " locations completed. Resume to continue from the saved page.");
+        setStatus(pauseReason || ("Batch paused. " + progress.completed + "/" + progress.total + " locations completed. Resume to continue."));
       } else if (failed.length) {
         setStatus("Batch finished with " + failed.length + " failed location(s). " + progress.completed + "/" + progress.total + " completed; select Start / Resume to retry failed locations.");
       } else {
@@ -361,19 +305,13 @@ export default function App() {
     } catch (e) {
       setStatus("Batch stopped: " + (e as Error).message);
     } finally {
-      if (tabId !== undefined) {
-        const tab = await chrome.tabs.get(tabId).catch(() => null);
-        if (tab && !keepTabOpen && !/sorry|unusual traffic|captcha/i.test(tab.url || "")) {
-          await chrome.tabs.remove(tabId).catch(() => undefined);
-        }
-      }
       setBusy(false);
     }
   }
 
   function pause() {
     pauseRequested.current = true;
-    setStatus("Pause requested. The current page will finish before the batch pauses.");
+    setStatus("Pause requested. The current location search will finish before the batch pauses.");
   }
 
   function exportExcel() {
@@ -389,22 +327,22 @@ export default function App() {
   return <main className="app">
     <header>
       <h1>CityMail Finder</h1>
-      <p>Collect email matches from search results across multiple cities, one location at a time</p>
+      <p>Automatically search multiple locations and collect email matches, one location at a time</p>
     </header>
 
     <section>
-      <h2>Import cities</h2>
+      <h2>Import locations</h2>
       <label>Upload .xlsx or .csv (column name: City)
         <input type="file" accept=".xlsx,.xls,.csv" onChange={e => importCities(e.target.files?.[0])}/>
       </label>
     </section>
 
     <section>
-      <h2>Cities</h2>
-      <textarea value={cityInput} onChange={e => setCityInput(e.target.value)} placeholder="Add cities, one per line or comma separated"/>
-      <button onClick={addCities}>Add cities</button>
-      <button className="secondary" disabled={!cities.length || busy} onClick={clearCities}>Remove all cities</button>
-      <p>{cities.length} cities loaded</p>
+      <h2>Locations</h2>
+      <textarea value={cityInput} onChange={e => setCityInput(e.target.value)} placeholder="Add locations, one per line or comma separated"/>
+      <button onClick={addCities}>Add locations</button>
+      <button className="secondary" disabled={!cities.length || busy} onClick={clearCities}>Remove all locations</button>
+      <p>{cities.length} locations loaded</p>
       <ul className="managed-list">
         {cities.map(city => <li key={city}><span>{city}</span><button className="danger small" disabled={busy} onClick={() => removeCity(city)}>Remove</button></li>)}
       </ul>
@@ -412,21 +350,21 @@ export default function App() {
 
     <section>
       <h2>Search settings</h2>
-      <label>Search query (use {"{city}"} where city name should appear)
+      <label>Search query (use {"{city}"} where the location name should appear)
         <input value={query} onChange={e => setQuery(e.target.value)}/>
       </label>
-      <label>Pages per city (1–50)
-        <input type="number" min="1" max="50" value={pages} onChange={e => setPages(Math.min(50, Math.max(1, Number(e.target.value) || 1)))}/>
+      <label>Maximum search results per location (1–10)
+        <input type="number" min="1" max="10" value={maxResults} onChange={e => setMaxResults(Math.min(10, Math.max(1, Number(e.target.value) || 1)))}/>
       </label>
-      <p>Locations are processed sequentially. Each location runs through its configured page limit before the next location starts. Progress is saved after every page.</p>
-      <p><strong>Manual verification required:</strong> Email-shaped matches are unverified. CityMail Finder does not verify ownership, validity, deliverability, or business association. Independently confirm each address before relying on it or contacting anyone.</p>
+      <p>One search API request is made for each location. After the configured results are collected, the batch automatically moves to the next location.</p>
+      <p><strong>Search provider:</strong> SearXNG is preferred when configured on the backend. The API may use its configured fallback provider if SearXNG is unavailable.</p>
+      <p><strong>Important:</strong> Email-shaped matches from search-result snippets are unverified. This version does not crawl linked business websites or verify ownership, validity, deliverability, or business association. Independently confirm each address before relying on it or contacting anyone.</p>
     </section>
 
     <section>
       <h2>Run batch</h2>
-      <p><strong>Manual CAPTCHA handling:</strong> If Google displays a verification challenge, complete it yourself in the opened Google tab. CityMail Finder does not solve or bypass verification. If the challenge remains, the batch pauses and can resume from that location and page.</p>
-      <button disabled={busy || !cities.length} onClick={run}>{busy ? "Processing locations…" : "Start / Resume batch"}</button>
-      <button className="secondary" disabled={!busy} onClick={pause}>Pause after current page</button>
+      <button disabled={busy || !cities.length} onClick={run}>{busy ? "Searching locations…" : "Start / Resume batch"}</button>
+      <button className="secondary" disabled={!busy} onClick={pause}>Pause after current location</button>
       <button disabled={busy || !results.length} onClick={exportExcel}>Export emails only</button>
       <p role="status">{status}</p>
 
@@ -435,15 +373,15 @@ export default function App() {
         <div style={{ height: 10, borderRadius: 8, background: "#28364b", overflow: "hidden" }}>
           <div style={{ width: progress.percentage + "%", height: "100%", background: "#4779d5", transition: "width .2s" }}/>
         </div>
-        {activeJob && <p>Current / next location: <strong>{activeJob.location}</strong> · page {activeJob.pageIndex + 1}</p>}
+        {activeJob && <p>Current / next location: <strong>{activeJob.location}</strong></p>}
         <div className="table">
           <table>
-            <thead><tr><th>Location</th><th>Status</th><th>Pages</th><th>Email matches</th></tr></thead>
+            <thead><tr><th>Location</th><th>Status</th><th>Search</th><th>Email matches</th></tr></thead>
             <tbody>
               {batchJobs.map(job => <tr key={job.id}>
                 <td>{job.location}</td>
                 <td>{job.status}{job.error ? " — " + job.error : ""}</td>
-                <td>{job.pageIndex}/{pages}</td>
+                <td>{job.pageIndex >= 1 ? "Done" : "Not started"}</td>
                 <td>{job.collectedCount}</td>
               </tr>)}
             </tbody>
@@ -470,12 +408,12 @@ export default function App() {
 
     <section>
       <h2>Storage management</h2>
-      <p>Remove all saved cities, collected emails, and the saved batch checkpoint from this browser.</p>
+      <p>Remove all saved locations, collected emails, and the saved batch checkpoint from this browser.</p>
       <button className="danger" disabled={busy} onClick={clearAllData}>Clear all saved data</button>
     </section>
 
     <footer>
-      Search results are accessed in your browser. Search providers may limit automated requests or show verification. CAPTCHA challenges require your manual action; the extension never solves or bypasses them. All collected email matches are unverified and require independent manual verification.
+      Search requests are sent to the configured CityMail Finder API and its configured search provider. The extension does not automate Google Search, solve CAPTCHA, or bypass provider access controls. All collected email matches are unverified.
     </footer>
   </main>;
 }
