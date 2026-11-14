@@ -83,37 +83,38 @@ async function scrollGoogleResults(tabId: number) {
       let grewDuringScroll = false;
       let scrolls = 0;
 
-      // Keep scrolling in the same Google tab. On continuous-scroll layouts,
-      // this allows newly appended results to load before we extract emails.
-      for (let i = 0; i < 12; i++) {
-        window.scrollTo(0, document.documentElement.scrollHeight);
-        await sleep(1100);
+      // Scroll visibly in viewport-sized increments so lazy-loaded content has
+      // a chance to appear. Stop after the bottom remains stable for 3 checks.
+      for (let i = 0; i < 40; i++) {
+        const beforeY = window.scrollY;
+        window.scrollBy(0, Math.max(450, Math.floor(window.innerHeight * 0.75)));
+        await sleep(900);
         const height = document.documentElement.scrollHeight;
         const count = resultCount();
+        const moved = window.scrollY > beforeY;
         if (height > previousHeight || count > previousCount) {
           grewDuringScroll = true;
           stableRounds = 0;
-        } else {
+        } else if (!moved || window.scrollY + window.innerHeight >= height - 8) {
           stableRounds++;
+        } else {
+          stableRounds = 0;
         }
         previousHeight = height;
         previousCount = count;
         scrolls++;
-        if (stableRounds >= 2) break;
+        if (stableRounds >= 3) break;
       }
 
       const bodyText = document.body?.innerText || "";
       const captcha = /unusual traffic|automated queries|not a robot|our systems have detected|sorry\/.*computer network/i.test(bodyText);
       const emails = [...new Set((bodyText.match(/[A-Z0-9.!#$%&'*+/=?^`_{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/gi) || []).map(x => x.toLowerCase()))];
-
-      // Desktop Google normally exposes a Next link. Prefer it when the page
-      // does not append more results while scrolling.
       const next = document.querySelector<HTMLAnchorElement>("#pnnext, a[aria-label='Next'], a[aria-label='More results']") ||
         [...document.querySelectorAll<HTMLAnchorElement>("a[href]")].find(a => /^(next|more results)$/i.test((a.innerText || a.getAttribute("aria-label") || "").trim()));
       return {
         captcha, emails, title: document.title, url: location.href,
         nextUrl: next?.href || null,
-        scrollLimitReached: scrolls === 12 && stableRounds < 2,
+        scrollLimitReached: scrolls === 40 && stableRounds < 3,
         scrolls, grewDuringScroll
       };
     }
@@ -382,6 +383,7 @@ export default function App() {
               sourceType: "google-visible-result", createdAt: timestamp,
             }));
             if (rows.length) { await saveRows(rows); rows.forEach(row => cityEmails.add(row.email)); setResults(await readRows()); }
+            completedBatches = page + 1;
             onProgress(cityEmails.size, page + 1);
             setStatus(city + " · result batch " + (page + 1) + "/" + maxPages + " · " + pageData.scrolls + " scrolls · " + cityEmails.size + " unique matches");
 
