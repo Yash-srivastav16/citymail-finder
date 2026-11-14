@@ -2,14 +2,13 @@
   "manifest_version": 3,
   "name": "CityMail Finder",
   "version": "1.1.2",
-  "description": "Collect visible email matches from Google Search results by city. Manual CAPTCHA handling; email matches are unverified.",
+  "description": "Automatically search multiple locations through the CityMail search API and collect unverified email matches.",
   "permissions": [
     "unlimitedStorage",
-    "tabs",
-    "scripting"
+    "tabs"
   ],
   "host_permissions": [
-    "https://www.google.com/search*"
+    "https://citymail-finder.vercel.app/*"
   ],
   "background": {
     "service_worker": "background.js"
