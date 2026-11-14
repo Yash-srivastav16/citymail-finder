@@ -2,13 +2,14 @@
   "manifest_version": 3,
   "name": "CityMail Finder",
   "version": "1.1.2",
-  "description": "Automatically search multiple locations through the CityMail search API and collect unverified email matches.",
+  "description": "Search Google results across multiple locations in Chrome and collect visible email matches.",
   "permissions": [
     "unlimitedStorage",
-    "tabs"
+    "tabs",
+    "scripting"
   ],
   "host_permissions": [
-    "https://citymail-finder.vercel.app/*"
+    "https://www.google.com/search*"
   ],
   "background": {
     "service_worker": "background.js"
