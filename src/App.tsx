@@ -75,10 +75,11 @@ async function extractVisibleEmails(tabId: number) {
 async function appendNextGoogleResults(tabId: number, pageNumber: number) {
   const [injected] = await chrome.scripting.executeScript({
     target: { tabId },
+    world: "MAIN",
     args: [pageNumber],
     func: async (page: number) => {
       const bodyText = document.body?.innerText || "";
-      const captchaPattern = /unusual traffic|automated queries|not a robot|our systems have detected|sorry\\/.*computer network/i;
+      const captchaPattern = /unusual traffic|automated queries|not a robot|our systems have detected|computer network/i;
       if (captchaPattern.test(bodyText)) return { captcha: true, appended: 0, url: location.href, reason: "Google verification required" };
 
       const current = new URL(location.href);
@@ -97,7 +98,7 @@ async function appendNextGoogleResults(tabId: number, pageNumber: number) {
       const html = await response.text();
       const parsed = new DOMParser().parseFromString(html, "text/html");
       const parsedText = parsed.body?.innerText || "";
-      if (captchaPattern.test(parsedText) || /sorry\\/index|consent\\.google/i.test(response.url)) {
+      if (captchaPattern.test(parsedText) || response.url.includes("/sorry/") || response.url.includes("consent.google")) {
         return { captcha: true, appended: 0, url: location.href, reason: "Google returned a verification or consent page" };
       }
 
@@ -148,47 +149,27 @@ async function scrollGoogleResults(tabId: number) {
   const [injected] = await chrome.scripting.executeScript({
     target: { tabId },
     func: async () => {
-      const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-      const resultCount = () => document.querySelectorAll("#search .MjjYud, #search .g, #rso > div").length;
-      let previousHeight = document.documentElement.scrollHeight;
-      let previousCount = resultCount();
-      let stableRounds = 0;
-      let grewDuringScroll = false;
+      const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+      const startHeight = document.documentElement.scrollHeight;
       let scrolls = 0;
-
-      // Scroll visibly in viewport-sized increments so lazy-loaded content has
-      // a chance to appear. Stop after the bottom remains stable for 3 checks.
-      for (let i = 0; i < 40; i++) {
-        const beforeY = window.scrollY;
-        window.scrollBy(0, Math.max(450, Math.floor(window.innerHeight * 0.75)));
-        await sleep(900);
-        const height = document.documentElement.scrollHeight;
-        const count = resultCount();
-        const moved = window.scrollY > beforeY;
-        if (height > previousHeight || count > previousCount) {
-          grewDuringScroll = true;
-          stableRounds = 0;
-        } else if (!moved || window.scrollY + window.innerHeight >= height - 8) {
-          stableRounds++;
-        } else {
-          stableRounds = 0;
-        }
-        previousHeight = height;
-        previousCount = count;
+      // Move through the currently loaded result cards visibly. Loading more
+      // result batches is handled separately by the same-page SERP stitcher.
+      for (let i = 0; i < 8; i++) {
+        const before = window.scrollY;
+        window.scrollBy({ top: Math.max(500, Math.floor(window.innerHeight * 0.8)), behavior: "smooth" });
+        await pause(350);
         scrolls++;
-        if (stableRounds >= 3) break;
+        if (window.scrollY === before || window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 4) break;
       }
-
       const bodyText = document.body?.innerText || "";
-      const captcha = /unusual traffic|automated queries|not a robot|our systems have detected|sorry\/.*computer network/i.test(bodyText);
-      const emails = [...new Set((bodyText.match(/[A-Z0-9.!#$%&'*+/=?^`_{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/gi) || []).map(x => x.toLowerCase()))];
-      const next = document.querySelector<HTMLAnchorElement>("#pnnext, a[aria-label='Next'], a[aria-label='More results']") ||
-        [...document.querySelectorAll<HTMLAnchorElement>("a[href]")].find(a => /^(next|more results)$/i.test((a.innerText || a.getAttribute("aria-label") || "").trim()));
+      const captcha = /unusual traffic|automated queries|not a robot|our systems have detected|computer network/i.test(bodyText);
+      const emails = [...new Set((bodyText.match(/[A-Z0-9.!#$%&'*+/=?^`_{|}~-]+@[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?(?:\\.[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?)+/gi) || []).map(x => x.toLowerCase()))];
       return {
         captcha, emails, title: document.title, url: location.href,
-        nextUrl: next?.href || null,
-        scrollLimitReached: scrolls === 40 && stableRounds < 3,
-        scrolls, grewDuringScroll
+        nextUrl: null,
+        scrollLimitReached: false,
+        scrolls,
+        grewDuringScroll: document.documentElement.scrollHeight > startHeight
       };
     }
   });
@@ -437,7 +418,7 @@ export default function App() {
           for (let page = Math.max(0, startPageIndex); page < maxPages; page++) {
             if (shouldPause()) return { collectedCount: cityEmails.size, pageIndex: page, paused: true };
             onProgress(cityEmails.size, page);
-            setStatus("Scrolling Google Search · " + city + " · result batch " + (page + 1) + "/" + maxPages);
+            setStatus("Collecting Google results · " + city + " · batch " + (page + 1) + "/" + maxPages);
             await sleep(900);
             let pageData = await scrollGoogleResults(googleTabId);
             if (pageData.captcha) {
@@ -472,6 +453,9 @@ export default function App() {
             // current page session and append its result cards into the existing
             // #rso container. The visible tab URL never changes and Next is
             // never clicked or followed through tab navigation.
+            // Small courtesy delay between Google requests; this does not bypass
+            // verification or any Google access controls.
+            await sleep(2500);
             const appended = await appendNextGoogleResults(googleTabId, page + 2);
             if (appended.captcha) {
               keepGoogleTabOpen = true;
@@ -554,9 +538,9 @@ export default function App() {
         <input value={query} onChange={e => setQuery(e.target.value)}/>
       </label>
       <label>Google Search pages per location (1–50)
-        <input type="number" min="1" max="10" value={pages} onChange={e => setPages(Math.min(50, Math.max(1, Number(e.target.value) || 1)))}/>
+        <input type="number" min="1" max="50" value={pages} onChange={e => setPages(Math.min(50, Math.max(1, Number(e.target.value) || 1)))}/>
       </label>
-      <p>The extension keeps one Google Search URL open and appends subsequent result sets into the same results list. It does not click Next, navigate to another results page, or open another tab. Results are loaded using the current Google browser session; verification challenges require manual handling.</p>
+      <p>The extension keeps one Google Search URL open and stitches additional Google result batches into the same results list, like a SERP auto-pager. It does not click Next, reload the search page, or navigate between result pages. Each batch is fetched using your current Google browser session; verification challenges require manual handling.</p>
       <p><strong>Search method:</strong> Chrome tab automation using Google Search pages. No search API key or external provider is configured.</p>
       <p><strong>Important:</strong> Email-shaped matches from search-result snippets are unverified. This version does not crawl linked business websites or verify ownership, validity, deliverability, or business association. Independently confirm each address before relying on it or contacting anyone.</p>
     </section>
