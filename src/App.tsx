@@ -267,7 +267,7 @@ export default function App() {
 
           if (body.ok !== true || !Array.isArray(body.results)) throw new Error("Search API returned an unexpected response. Check the configured API endpoint.");
 
-          const found = body.results;
+          const found = body.results.slice(0, maxResults);
           const timestamp = new Date().toISOString();
           const rows: Result[] = found
             .filter(item => typeof item.email === "string" && item.email.includes("@"))
