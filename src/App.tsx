@@ -82,9 +82,9 @@ async function appendNextGoogleResults(tabId: number, pageNumber: number) {
       if (captchaPattern.test(bodyText)) return { captcha: true, appended: 0, url: location.href, reason: "Google verification required" };
 
       const current = new URL(location.href);
-      const currentStart = Number(current.searchParams.get("start") || "0");
       const next = new URL(current.href);
-      next.searchParams.set("start", String(currentStart + 10));
+      // `page` is one-based for the appended result batch (batch 2 = start 10).
+      next.searchParams.set("start", String(Math.max(0, page - 1) * 10));
       next.searchParams.set("num", "10");
       next.searchParams.set("filter", "0");
 
@@ -426,6 +426,11 @@ export default function App() {
             if (typeof tab.id !== "number") throw new Error("Could not open Google Search tab.");
             googleTabId = tab.id;
             if (tab.status !== "complete") await waitForTab(googleTabId);
+          } else {
+            // Reuse the same visible Google tab for the next spreadsheet
+            // location, but keep each location's result batches on one URL.
+            await navigateTab(googleTabId, searchUrl);
+            await chrome.tabs.update(googleTabId, { active: true });
           }
 
           let completedBatches = Math.max(0, startPageIndex);
