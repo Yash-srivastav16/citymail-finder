@@ -32,12 +32,12 @@
 
     <h2>Permissions</h2>
     <ul>
-      <li><strong>tabs:</strong> open, monitor, update and close the Google Search tab used by the workflow.</li>
+      <li><strong>storage:</strong> save the rating-reminder state locally in Chrome extension storage, including completed-session count, last reminder time and the user's reminder/dismissal choices.</li>\n      <li><strong>tabs:</strong> open, monitor, update, activate when manual verification is needed, and close the Google Search tab used by the workflow.</li>
       <li><strong>scripting:</strong> read visible text from the Google Search result page to identify email-shaped strings.</li>
       <li><strong>unlimitedStorage:</strong> retain the local IndexedDB result collection without the usual extension storage quota restrictions.</li>
       <li><strong>https://www.google.com/search* host access:</strong> allow the extension to run its page-reading script on Google Search result pages.</li>
     </ul>
-    <p>The extension also uses browser local storage and IndexedDB within its own extension page. Review the shipped manifest and code for the exact permissions in a given release.</p>
+    <p>The <strong>storage</strong> permission is used only for the local rating-reminder preferences described above; it does not send those preferences to a CityMail Finder server. The extension page separately uses browser local storage for city/query/page settings and its resume checkpoint. Review the shipped manifest and code for the exact permissions in a given release.</p>
 
     <h2>Sharing and sale</h2>
     <p>The current extension code does not sell or transmit the collected result list to CityMail Finder. Search requests are sent to Google by your browser as described above. Do not collect, export, disclose or use personal data in ways that violate applicable privacy, data protection, anti-spam or marketing laws.</p>
