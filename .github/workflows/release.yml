@@ -37,13 +37,6 @@ jobs:
           (cd dist && zip -r "../release/citymail-finder-v${VERSION}.zip" .)
           unzip -l "release/citymail-finder-v${VERSION}.zip"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-      - name: Upload release package artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: citymail-finder-v${{ env.VERSION }}-package
-          path: release/citymail-finder-v${{ env.VERSION }}.zip
-          if-no-files-found: error
-          retention-days: 90
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
