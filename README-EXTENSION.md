@@ -42,6 +42,12 @@ Do not load the repository root; load `dist`.
 - Do not claim that email addresses are verified, that every business is covered, or that the extension is endorsed/approved by Google.
 - Test install, update, uninstall, data deletion, and the extension's behaviour when Google changes its result-page markup.
 
+## Permission details
+
+The Manifest V3 `storage` permission is used for Chrome's extension-local storage API to persist the rating reminder state: successful-session count, last prompt time, whether the review link was clicked, and whether the user chose not to be asked again. It is not used to upload data to a remote service. The app's city list, query, page-count setting and resume checkpoint use the extension page's browser local storage.
+
+The `unlimitedStorage` permission supports the extension origin's local IndexedDB collection store. The `tabs` permission manages the Google Search tab used by the workflow. The `scripting` permission reads visible result-page text, and the Google Search host permission scopes that access to Google Search result URLs.
+
 ## Data handling
 
 The current app uses browser IndexedDB for collected results and browser local storage for city/query/page settings and its resume checkpoint. It does not require a CityMail Finder account. Exported spreadsheets are saved by the browser to the user's device. Google receives the search requests directly from the user's browser and handles them under Google's own policies.
