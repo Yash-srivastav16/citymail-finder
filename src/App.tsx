@@ -104,7 +104,8 @@ export default function App() {
   const [pages, setPages] = useState(Number(localStorage.getItem("cm-pages-v2") || 10));
   const [results, setResults] = useState<Result[]>([]);
   const [status, setStatus] = useState("Ready");
-  const [busy, setBusy] = useState(false);\n  const [ratingPromptVisible, setRatingPromptVisible] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [ratingPromptVisible, setRatingPromptVisible] = useState(false);
   useEffect(() => {
     readRows().then(setResults).catch(e => setStatus(e.message));
     chrome.storage.local.get(RATING_STORAGE_KEY).then(async stored => {
