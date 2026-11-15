@@ -11,7 +11,7 @@ CityMail Finder is a browser-based business email research extension. It searche
 - Add cities manually.
 - Configure a search query using `{city}` as the location placeholder.
 - Review Google search results page by page.
-- Extract email addresses visible in Google result-page text only.
+- Extract email addresses visible in Google Search result-page text only.
 - Save results locally in browser IndexedDB and deduplicate by email address.
 - Resume a search from its saved city/page checkpoint after an interruption.
 - Export unique email addresses to an Excel workbook.
@@ -39,6 +39,10 @@ npm run build
 
 Load the generated `dist` folder in Chrome using Extensions → Developer mode → Load unpacked.
 
+## Extension releases
+
+See [docs/releasing.md](docs/releasing.md) for versioning, GitHub Actions packaging, GitHub Release and manual Chrome Web Store submission. Pull request builds never publish to the Chrome Web Store; store submission remains an explicit manual approval step.
+
 ## Marketing website deployment (GitHub Pages)
 
 1. Open the repository's **Settings → Pages**.
@@ -48,10 +52,6 @@ Load the generated `dist` folder in Chrome using Extensions → Developer mode �
 5. Check the published URL: https://yash-srivastav16.github.io/citymail-finder/
 
 The `docs/` directory contains the canonical URLs, Open Graph metadata, structured data, sitemap and robots.txt. If the GitHub Pages username or project URL changes, update canonical URLs, sitemap URLs and social metadata in the HTML and XML files.
-
-## Launch status
-
-The marketing website files have been added, but GitHub Pages still needs to be enabled in repository settings. The extension build, live browser workflow, store submission requirements and production security checks must be validated before calling the extension production-ready.
 
 ## Responsible use and privacy
 
