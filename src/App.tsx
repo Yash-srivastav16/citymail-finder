@@ -3,6 +3,26 @@ import * as XLSX from "xlsx";
 
 type Result = { city: string; email: string; sourceUrl: string; domain: string; sourceType: string; createdAt: string };
 const DB = "citymail-finder";
+const RATING_STORAGE_KEY = "cm-rating-reminder-v1";
+const RATING_REMINDER_DELAY_MS = 48 * 60 * 60 * 1000;
+type RatingReminderState = {
+  successfulSessions: number;
+  lastPromptAt: number | null;
+  reviewLinkClicked: boolean;
+  dontAskAgain: boolean;
+};
+const DEFAULT_RATING_STATE: RatingReminderState = {
+  successfulSessions: 0,
+  lastPromptAt: null,
+  reviewLinkClicked: false,
+  dontAskAgain: false
+};
+function isRatingPromptDue(state: RatingReminderState, now = Date.now()) {
+  return state.successfulSessions >= 3 &&
+    !state.reviewLinkClicked &&
+    !state.dontAskAgain &&
+    (state.lastPromptAt === null || now - state.lastPromptAt >= RATING_REMINDER_DELAY_MS);
+}
 
 function dbOpen(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -85,9 +105,40 @@ export default function App() {
   const [results, setResults] = useState<Result[]>([]);
   const [status, setStatus] = useState("Ready");
   const [busy, setBusy] = useState(false);
-  useEffect(() => { readRows().then(setResults).catch(e => setStatus(e.message)); }, []);
+  const [ratingPromptVisible, setRatingPromptVisible] = useState(false);
+  useEffect(() => {
+    readRows().then(setResults).catch(e => setStatus(e.message));
+    chrome.storage.local.get(RATING_STORAGE_KEY).then(async stored => {
+      const ratingState = { ...DEFAULT_RATING_STATE, ...(stored[RATING_STORAGE_KEY] || {}) } as RatingReminderState;
+      if (isRatingPromptDue(ratingState)) {
+        const nextState = { ...ratingState, lastPromptAt: Date.now() };
+        await chrome.storage.local.set({ [RATING_STORAGE_KEY]: nextState });
+        setRatingPromptVisible(true);
+      }
+    }).catch(error => console.warn("Could not load rating reminder state:", error));
+  }, []);
   useEffect(() => { localStorage.setItem("cm-cities", JSON.stringify(cities)); localStorage.setItem("cm-pages-v2", String(pages)); localStorage.setItem("cm-query-v1", query); }, [cities, pages, query]);
 
+  async function handleMaybeLater() {
+    const stored = await chrome.storage.local.get(RATING_STORAGE_KEY);
+    const ratingState = { ...DEFAULT_RATING_STATE, ...(stored[RATING_STORAGE_KEY] || {}) } as RatingReminderState;
+    await chrome.storage.local.set({ [RATING_STORAGE_KEY]: { ...ratingState, lastPromptAt: Date.now() } });
+    setRatingPromptVisible(false);
+  }
+  async function handleDontAskAgain() {
+    const stored = await chrome.storage.local.get(RATING_STORAGE_KEY);
+    const ratingState = { ...DEFAULT_RATING_STATE, ...(stored[RATING_STORAGE_KEY] || {}) } as RatingReminderState;
+    await chrome.storage.local.set({ [RATING_STORAGE_KEY]: { ...ratingState, dontAskAgain: true } });
+    setRatingPromptVisible(false);
+  }
+  async function handleRateOnStore() {
+    const stored = await chrome.storage.local.get(RATING_STORAGE_KEY);
+    const ratingState = { ...DEFAULT_RATING_STATE, ...(stored[RATING_STORAGE_KEY] || {}) } as RatingReminderState;
+    await chrome.storage.local.set({ [RATING_STORAGE_KEY]: { ...ratingState, reviewLinkClicked: true } });
+    setRatingPromptVisible(false);
+    const reviewUrl = `https://chromewebstore.google.com/detail/${chrome.runtime.id}/reviews`;
+    await chrome.tabs.create({ url: reviewUrl });
+  }
   async function importCities(file?: File) {
     if (!file) return;
     try {
