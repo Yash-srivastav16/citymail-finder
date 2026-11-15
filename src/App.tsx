@@ -142,7 +142,7 @@ export default function App() {
     if (!extension?.storage?.local || !extension.runtime?.id || !extension.tabs?.create) return;
     await updateRatingState({ reviewLinkClicked: true });
     setRatingPromptVisible(false);
-    const reviewUrl = `https://chromewebstore.google.com/detail/${extension.runtime.id}/reviews`;
+    const reviewUrl = `https://chromewebstore.google.com/detail/citymail-finder/${extension.runtime.id}/reviews`;
     await extension.tabs.create({ url: reviewUrl });
   }
   async function importCities(file?: File) {
