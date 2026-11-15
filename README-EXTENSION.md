@@ -37,10 +37,16 @@ Do not load the repository root; load `dist`.
 - Add required PNG extension icons (16×16, 32×32, 48×48 and 128×128) and reference them in `public/manifest.json`.
 - Provide accurate store screenshots and a truthful short/long description.
 - In the Web Store privacy disclosures, declare the handling of email addresses and city lists accurately. State that processing is local only if verified against the complete shipped build.
-- Justify every requested permission: `tabs`, `scripting`, `unlimitedStorage`, and Google Search host access. Remove permissions that are not required.
+- Justify every requested permission: `storage` (rating-reminder preferences and session count), `tabs` (open/monitor/navigate/close the Google Search tab), `scripting` (read visible result-page text), `unlimitedStorage` (local IndexedDB result storage), and Google Search host access (restrict page access to Google Search result URLs). Remove permissions that are not required.
 - Publish the privacy policy at a stable public URL and ensure it exactly matches the shipped extension.
 - Do not claim that email addresses are verified, that every business is covered, or that the extension is endorsed/approved by Google.
 - Test install, update, uninstall, data deletion, and the extension's behaviour when Google changes its result-page markup.
+
+## Permission details
+
+The Manifest V3 `storage` permission is used for Chrome's extension-local storage API to persist the rating reminder state: successful-session count, last prompt time, whether the review link was clicked, and whether the user chose not to be asked again. It is not used to upload data to a remote service. The app's city list, query, page-count setting and resume checkpoint use the extension page's browser local storage.
+
+The `unlimitedStorage` permission supports the extension origin's local IndexedDB collection store. The `tabs` permission manages the Google Search tab used by the workflow. The `scripting` permission reads visible result-page text, and the Google Search host permission scopes that access to Google Search result URLs.
 
 ## Data handling
 
