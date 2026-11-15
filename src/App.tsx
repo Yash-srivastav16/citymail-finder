@@ -303,8 +303,8 @@ export default function App() {
     <section><h2>Run</h2><p><strong>Manual CAPTCHA handling:</strong> If Google displays a CAPTCHA or verification challenge, you must solve it yourself in the opened Google tab. CityMail Finder does not solve, bypass, or automate verification. If the challenge remains, use Start / Resume after completing it manually.</p><button disabled={busy || !cities.length} onClick={run}>{busy ? "Searching Google…" : "Start / Resume search"}</button><button disabled={busy || !results.length} onClick={exportExcel}>Export emails only</button><p role="status">{status}</p><p>{new Set(results.map(r => r.email.toLowerCase())).size} unique email addresses saved locally</p></section>
     <section><h2>Collected emails</h2><button className="danger" disabled={busy || !results.length} onClick={clearEmails}>Delete all emails</button><div className="table"><table><thead><tr><th>Email</th><th>Action</th></tr></thead><tbody>{[...new Set(results.map(r => r.email.toLowerCase()))].map(email => <tr key={email}><td>{email}</td><td><button className="danger small" disabled={busy} onClick={() => removeEmail(email)}>Remove</button></td></tr>)}</tbody></table></div></section>
     <section><h2>Storage management</h2><p>Remove all saved cities, collected emails, and the saved search checkpoint from this browser.</p><button className="danger" disabled={busy} onClick={clearAllData}>Clear all saved data</button></section>
-    {ratingPromptVisible && <div className="rating-modal-backdrop" role="presentation">
-      <section className="rating-modal" role="dialog" aria-modal="true" aria-labelledby="rating-modal-title">
+    {ratingPromptVisible && <div className="rating-backdrop" role="presentation">
+      <section className="rating-dialog" role="dialog" aria-modal="true" aria-labelledby="rating-modal-title">
         <h2 id="rating-modal-title">Enjoying CityMail Finder?</h2>
         <p>If this tool has been useful, would you consider leaving an honest rating on the Chrome Web Store?</p>
         <div className="rating-modal-actions">
