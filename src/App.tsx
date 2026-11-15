@@ -108,36 +108,42 @@ export default function App() {
   const [ratingPromptVisible, setRatingPromptVisible] = useState(false);
   useEffect(() => {
     readRows().then(setResults).catch(e => setStatus(e.message));
-    chrome.storage.local.get(RATING_STORAGE_KEY).then(async stored => {
+    // This reminder is extension-only; Vercel has no chrome.storage API.
+    const storage = globalThis.chrome?.storage?.local;
+    if (!storage) return;
+    storage.get(RATING_STORAGE_KEY).then(async stored => {
       const ratingState = { ...DEFAULT_RATING_STATE, ...(stored[RATING_STORAGE_KEY] || {}) } as RatingReminderState;
       if (isRatingPromptDue(ratingState)) {
         const nextState = { ...ratingState, lastPromptAt: Date.now() };
-        await chrome.storage.local.set({ [RATING_STORAGE_KEY]: nextState });
+        await storage.set({ [RATING_STORAGE_KEY]: nextState });
         setRatingPromptVisible(true);
       }
     }).catch(error => console.warn("Could not load rating reminder state:", error));
   }, []);
   useEffect(() => { localStorage.setItem("cm-cities", JSON.stringify(cities)); localStorage.setItem("cm-pages-v2", String(pages)); localStorage.setItem("cm-query-v1", query); }, [cities, pages, query]);
 
-  async function handleMaybeLater() {
-    const stored = await chrome.storage.local.get(RATING_STORAGE_KEY);
+  async function updateRatingState(update: Partial<RatingReminderState>) {
+    const storage = globalThis.chrome?.storage?.local;
+    if (!storage) return;
+    const stored = await storage.get(RATING_STORAGE_KEY);
     const ratingState = { ...DEFAULT_RATING_STATE, ...(stored[RATING_STORAGE_KEY] || {}) } as RatingReminderState;
-    await chrome.storage.local.set({ [RATING_STORAGE_KEY]: { ...ratingState, lastPromptAt: Date.now() } });
+    await storage.set({ [RATING_STORAGE_KEY]: { ...ratingState, ...update } });
+  }
+  async function handleMaybeLater() {
+    await updateRatingState({ lastPromptAt: Date.now() });
     setRatingPromptVisible(false);
   }
   async function handleDontAskAgain() {
-    const stored = await chrome.storage.local.get(RATING_STORAGE_KEY);
-    const ratingState = { ...DEFAULT_RATING_STATE, ...(stored[RATING_STORAGE_KEY] || {}) } as RatingReminderState;
-    await chrome.storage.local.set({ [RATING_STORAGE_KEY]: { ...ratingState, dontAskAgain: true } });
+    await updateRatingState({ dontAskAgain: true });
     setRatingPromptVisible(false);
   }
   async function handleRateOnStore() {
-    const stored = await chrome.storage.local.get(RATING_STORAGE_KEY);
-    const ratingState = { ...DEFAULT_RATING_STATE, ...(stored[RATING_STORAGE_KEY] || {}) } as RatingReminderState;
-    await chrome.storage.local.set({ [RATING_STORAGE_KEY]: { ...ratingState, reviewLinkClicked: true } });
+    const extension = globalThis.chrome;
+    if (!extension?.storage?.local || !extension.runtime?.id || !extension.tabs?.create) return;
+    await updateRatingState({ reviewLinkClicked: true });
     setRatingPromptVisible(false);
-    const reviewUrl = `https://chromewebstore.google.com/detail/${chrome.runtime.id}/reviews`;
-    await chrome.tabs.create({ url: reviewUrl });
+    const reviewUrl = "https://chromewebstore.google.com/detail/bnmmknajlfeohmhfhcckjjglbemejnmk/reviews";
+    await extension.tabs.create({ url: reviewUrl });
   }
   async function importCities(file?: File) {
     if (!file) return;
@@ -190,7 +196,8 @@ export default function App() {
   }
   async function run() {
     if (!cities.length) { setStatus("Import or add at least one city."); return; }
-    if (!chrome?.tabs || !chrome?.scripting) { setStatus("Open this tool from the installed Chrome extension."); return; }
+    const extension = globalThis.chrome;
+    if (!extension?.tabs || !extension?.scripting) { setStatus("Open this tool from the installed Chrome extension."); return; }
     setBusy(true);
     let tabId: number | undefined;
     let total = 0;
@@ -255,6 +262,22 @@ export default function App() {
         }
       }
       localStorage.removeItem(checkpointKey);
+      // Only a fully completed batch counts; interrupted runs return earlier.
+      const storage = globalThis.chrome?.storage?.local;
+      if (storage) {
+        const stored = await storage.get(RATING_STORAGE_KEY);
+        const previous = stored[RATING_STORAGE_KEY] || {};
+        const ratingState = {
+          ...DEFAULT_RATING_STATE,
+          ...previous,
+          successfulSessions: (previous.successfulSessions || 0) + 1
+        } as RatingReminderState;
+        if (isRatingPromptDue(ratingState)) {
+          ratingState.lastPromptAt = Date.now();
+          setRatingPromptVisible(true);
+        }
+        await storage.set({ [RATING_STORAGE_KEY]: ratingState });
+      }
       setStatus("Finished. Found " + total + " email matches; duplicates are removed.");
     } catch (e) {
       setStatus("Stopped: " + (e as Error).message);
@@ -280,6 +303,17 @@ export default function App() {
     <section><h2>Run</h2><p><strong>Manual CAPTCHA handling:</strong> If Google displays a CAPTCHA or verification challenge, you must solve it yourself in the opened Google tab. CityMail Finder does not solve, bypass, or automate verification. If the challenge remains, use Start / Resume after completing it manually.</p><button disabled={busy || !cities.length} onClick={run}>{busy ? "Searching Google…" : "Start / Resume search"}</button><button disabled={busy || !results.length} onClick={exportExcel}>Export emails only</button><p role="status">{status}</p><p>{new Set(results.map(r => r.email.toLowerCase())).size} unique email addresses saved locally</p></section>
     <section><h2>Collected emails</h2><button className="danger" disabled={busy || !results.length} onClick={clearEmails}>Delete all emails</button><div className="table"><table><thead><tr><th>Email</th><th>Action</th></tr></thead><tbody>{[...new Set(results.map(r => r.email.toLowerCase()))].map(email => <tr key={email}><td>{email}</td><td><button className="danger small" disabled={busy} onClick={() => removeEmail(email)}>Remove</button></td></tr>)}</tbody></table></div></section>
     <section><h2>Storage management</h2><p>Remove all saved cities, collected emails, and the saved search checkpoint from this browser.</p><button className="danger" disabled={busy} onClick={clearAllData}>Clear all saved data</button></section>
+    {ratingPromptVisible && <div className="rating-backdrop" role="presentation">
+      <section className="rating-dialog" role="dialog" aria-modal="true" aria-labelledby="rating-modal-title">
+        <h2 id="rating-modal-title">Enjoying CityMail Finder?</h2>
+        <p>If this tool has been useful, would you consider leaving an honest rating on the Chrome Web Store?</p>
+        <div className="rating-modal-actions">
+          <button onClick={handleRateOnStore}>Rate on Chrome Web Store</button>
+          <button className="secondary" onClick={handleMaybeLater}>Maybe later</button>
+          <button className="secondary" onClick={handleDontAskAgain}>Don't ask again</button>
+        </div>
+      </section>
+    </div>}
     <footer>Uses Google search results in your browser. Google may limit automated requests or show verification. CAPTCHA challenges require your manual action; the extension never solves or bypasses them. All collected email matches are unverified and require independent manual verification.</footer>
   </main>;
 }
